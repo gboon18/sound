@@ -4,7 +4,7 @@ import argparse
 import json
 import subprocess
 from pathlib import Path
-from typing import Literal, Optional, Tuple, List
+from typing import Literal, Optional, Tuple, List, Dict
 
 import numpy as np
 import soundfile as sf
@@ -15,10 +15,6 @@ RectHz = Tuple[float, float, float, float]  # (t0_sec, t1_sec, f0_hz, f1_hz)
 
 
 def ffprobe_audio_info(in_path: Path) -> Tuple[int, int]:
-    """
-    Returns (sample_rate_hz, channels) for the first audio stream.
-    Requires ffprobe installed (bundled with ffmpeg).
-    """
     cmd = [
         "ffprobe", "-v", "error",
         "-select_streams", "a:0",
@@ -44,13 +40,6 @@ def convert_to_wav_ffmpeg(
     sr: Optional[int] = None,
     channels: Optional[int] = None,
 ) -> None:
-    """
-    Convert audio to PCM WAV via ffmpeg.
-
-    Best-practice defaults:
-      - If sr is None: keep the original sample rate.
-      - If channels is None: keep the original channel count.
-    """
     out_path.parent.mkdir(parents=True, exist_ok=True)
     cmd = ["ffmpeg", "-y", "-i", str(in_path)]
     if channels is not None:
@@ -64,11 +53,6 @@ def convert_to_wav_ffmpeg(
 
 
 def load_audio_wav(path: Path) -> Tuple[np.ndarray, int]:
-    """
-    Returns:
-      x: (n,) for mono or (n, c) for multichannel
-      sr
-    """
     x, sr = sf.read(path, dtype="float32", always_2d=False)
     if x.ndim == 1:
         return x.astype(np.float32, copy=False), sr
@@ -95,21 +79,7 @@ def _safe_log(a: np.ndarray, eps: float = 1e-8) -> np.ndarray:
     return np.log(np.maximum(a, eps))
 
 
-def spectral_envelope_cepstrum(mag: np.ndarray, lifter_quefrency_bins: int) -> np.ndarray:
-    log_mag = _safe_log(mag)
-    cep = np.fft.irfft(log_mag, axis=0)
-    cep_lift = np.zeros_like(cep)
-    q = min(lifter_quefrency_bins, cep.shape[0])
-    cep_lift[:q, :] = cep[:q, :]
-    log_env = np.fft.rfft(cep_lift, axis=0).real
-    return np.exp(log_env)
-
-
 def rects_hz_to_mask(rects: List[RectHz], sr: int, n_fft: int, hop: int, F: int, T: int) -> np.ndarray:
-    """
-    Build an STFT mask M[f,t] from rectangles defined in seconds and Hz.
-    rect: (t0_sec, t1_sec, f0_hz, f1_hz)
-    """
     if not rects:
         return np.ones((F, T), dtype=np.float32)
 
@@ -130,25 +100,78 @@ def rects_hz_to_mask(rects: List[RectHz], sr: int, n_fft: int, hop: int, F: int,
     return mask
 
 
+def parse_rects(rect_args: Optional[List[str]]) -> List[RectHz]:
+    if not rect_args:
+        return []
+    rects: List[RectHz] = []
+    for s in rect_args:
+        parts = [p.strip() for p in s.split(",")]
+        if len(parts) != 4:
+            raise ValueError(f"Bad --rect '{s}'. Use t0,t1,f0,f1 (seconds, Hz).")
+        t0, t1, f0, f1 = (float(parts[0]), float(parts[1]), float(parts[2]), float(parts[3]))
+        if t1 < t0:
+            t0, t1 = t1, t0
+        if f1 < f0:
+            f0, f1 = f1, f0
+        rects.append((t0, t1, f0, f1))
+    return rects
+
+
+def parse_time_map(s: Optional[str]) -> Dict[float, float]:
+    if s is None:
+        return {}
+    try:
+        data = json.loads(s)
+    except json.JSONDecodeError as e:
+        raise ValueError(f"Failed to parse JSON: {e}\nGot: {s}") from e
+    if not isinstance(data, dict):
+        raise ValueError("Time map must be a JSON object/dict.")
+    out: Dict[float, float] = {}
+    for k, v in data.items():
+        out[float(k)] = float(v)
+    if len(out) == 0:
+        return {}
+    return dict(sorted(out.items(), key=lambda kv: kv[0]))
+
+
+def interp_time_map(time_map: Dict[float, float], frame_times: np.ndarray, default: float) -> np.ndarray:
+    if not time_map:
+        return np.full(frame_times.shape, float(default), dtype=np.float32)
+    ts = np.array(list(time_map.keys()), dtype=np.float64)
+    vs = np.array(list(time_map.values()), dtype=np.float64)
+    out = np.interp(frame_times.astype(np.float64), ts, vs, left=vs[0], right=vs[-1])
+    return out.astype(np.float32)
+
+
+def spectral_envelope_cepstrum_timevarying(mag: np.ndarray, lifter_q_per_frame: np.ndarray) -> np.ndarray:
+    log_mag = _safe_log(mag)
+    cep = np.fft.irfft(log_mag, axis=0)  # (Q,T)
+    Q, T = cep.shape
+
+    q = np.rint(lifter_q_per_frame).astype(np.int32)
+    q = np.clip(q, 1, Q)
+
+    k_idx = np.arange(Q, dtype=np.int32)[:, None]
+    mask = (k_idx < q[None, :]).astype(np.float32)
+
+    cep_lift = cep * mask
+    log_env = np.fft.rfft(cep_lift, axis=0).real
+    return np.exp(log_env).astype(np.float32, copy=False)
+
+
 def timbre_transfer_envelope_mono(
     source: np.ndarray,
     excitation: np.ndarray,
     sr: int,
     n_fft: int,
     hop: int,
-    lifter_quefrency_bins: int,
-    mix_env_amount: float,
+    lifter_q_map: Dict[float, float],
+    mix_map: Dict[float, float],
+    lifter_q_default: float,
+    mix_default: float,
     rects: List[RectHz],
     use_excitation_phase: bool = True,
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-    """
-    Returns:
-      y: time signal
-      Zs: source STFT (complex)
-      Ze: excitation STFT (complex)
-      Zout: output STFT (complex)
-      M: rectangle mask used on source (float32 0/1)
-    """
     n = min(source.size, excitation.size)
     source = source[:n]
     excitation = excitation[:n]
@@ -162,15 +185,21 @@ def timbre_transfer_envelope_mono(
     Ze = Ze[:, :frames]
 
     F, T = Zs.shape
+    frame_times = np.arange(T, dtype=np.float32) * (hop / float(sr))
+
     M = rects_hz_to_mask(rects, sr, n_fft, hop, F, T)
 
     mag_s = np.abs(Zs) * M
-    mag_s = mag_s + (1e-8 * (1.0 - M))  # avoid log(0) outside selection
+    mag_s = mag_s + (1e-8 * (1.0 - M))
 
-    env_s = spectral_envelope_cepstrum(mag_s, lifter_quefrency_bins)
+    lifter_q_per_frame = interp_time_map(lifter_q_map, frame_times, default=lifter_q_default)
+    mix_per_frame = interp_time_map(mix_map, frame_times, default=mix_default)
+    mix_per_frame = np.clip(mix_per_frame, 0.0, 2.0)
+
+    env_s = spectral_envelope_cepstrum_timevarying(mag_s, lifter_q_per_frame)
     env_s = env_s / (np.mean(env_s, axis=0, keepdims=True) + 1e-8)
 
-    env_apply = np.power(env_s, float(np.clip(mix_env_amount, 0.0, 1.0)))
+    env_apply = np.power(env_s, mix_per_frame[None, :])
     new_mag = np.abs(Ze) * env_apply
 
     if use_excitation_phase:
@@ -194,22 +223,20 @@ def timbre_transfer_envelope(
     sr: int,
     n_fft: int,
     hop: int,
-    lifter_quefrency_bins: int,
-    mix_env_amount: float,
+    lifter_q_map: Dict[float, float],
+    mix_map: Dict[float, float],
+    lifter_q_default: float,
+    mix_default: float,
     stereo_mode: Literal["per_channel", "shared_envelope"],
     rects: List[RectHz],
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-    """
-    Returns:
-      y (time), Zs, Ze, Zout, M
-    For multichannel, Zs/Ze/Zout are for channel 0 in per_channel, or mid in shared_envelope, to support plotting.
-    """
     if source.ndim == 1:
         exc_m = excitation if excitation.ndim == 1 else excitation[:, 0]
-        y, Zs, Ze, Zout, M = timbre_transfer_envelope_mono(
-            source, exc_m, sr, n_fft, hop, lifter_quefrency_bins, mix_env_amount, rects, True
+        return timbre_transfer_envelope_mono(
+            source, exc_m, sr, n_fft, hop,
+            lifter_q_map, mix_map, lifter_q_default, mix_default,
+            rects, True
         )
-        return y, Zs, Ze, Zout, M
 
     if excitation.ndim == 1:
         excitation = excitation[:, None]
@@ -224,22 +251,24 @@ def timbre_transfer_envelope(
 
     if stereo_mode == "shared_envelope":
         mid = np.mean(source, axis=1)
-        # Use mid/chan0 for plots
         plot_Zs = plot_Ze = plot_Zout = plot_M = None
         for c in range(C):
             y_c, Zs, Ze, Zout, M = timbre_transfer_envelope_mono(
-                mid, excitation[:, c], sr, n_fft, hop, lifter_quefrency_bins, mix_env_amount, rects, True
+                mid, excitation[:, c], sr, n_fft, hop,
+                lifter_q_map, mix_map, lifter_q_default, mix_default,
+                rects, True
             )
             out[:, c] = y_c
             if plot_Zs is None:
                 plot_Zs, plot_Ze, plot_Zout, plot_M = Zs, Ze, Zout, M
         return out, plot_Zs, plot_Ze, plot_Zout, plot_M
 
-    # per_channel
     plot_Zs = plot_Ze = plot_Zout = plot_M = None
     for c in range(C):
         y_c, Zs, Ze, Zout, M = timbre_transfer_envelope_mono(
-            source[:, c], excitation[:, c], sr, n_fft, hop, lifter_quefrency_bins, mix_env_amount, rects, True
+            source[:, c], excitation[:, c], sr, n_fft, hop,
+            lifter_q_map, mix_map, lifter_q_default, mix_default,
+            rects, True
         )
         out[:, c] = y_c
         if c == 0:
@@ -261,10 +290,6 @@ def plot_one_spectrogram_png(
     out_png: Path,
     rects: List[RectHz],
 ) -> None:
-    """
-    Plot a single spectrogram to out_png with rectangles overlaid (if provided).
-    Requires matplotlib.
-    """
     import matplotlib.pyplot as plt
     import matplotlib.patches as patches
 
@@ -273,7 +298,7 @@ def plot_one_spectrogram_png(
     f = np.arange(F) * (sr / n_fft)
 
     fig = plt.figure(figsize=(10, 4), dpi=150)
-    ax = fig.add_axes([0.08, 0.15, 0.88, 0.75])  # one axes (no subplots)
+    ax = fig.add_axes([0.08, 0.15, 0.88, 0.75])
 
     im = ax.imshow(
         db,
@@ -301,17 +326,11 @@ def plot_one_spectrogram_png(
 
 
 def stitch_pngs_vertical(png_paths: List[Path], out_png: Path) -> None:
-    """
-    Stitch PNGs vertically into one canvas image.
-    Requires Pillow.
-    """
     from PIL import Image
 
     imgs = [Image.open(p).convert("RGBA") for p in png_paths]
-    widths = [im.width for im in imgs]
-    heights = [im.height for im in imgs]
-    W = max(widths)
-    H = sum(heights)
+    W = max(im.width for im in imgs)
+    H = sum(im.height for im in imgs)
 
     canvas = Image.new("RGBA", (W, H), (255, 255, 255, 255))
     y = 0
@@ -322,42 +341,25 @@ def stitch_pngs_vertical(png_paths: List[Path], out_png: Path) -> None:
     canvas.save(out_png)
 
 
-def parse_rects(rect_args: Optional[List[str]]) -> List[RectHz]:
-    """
-    Parse --rect entries of the form: "t0,t1,f0,f1" in seconds and Hz.
-    """
-    if not rect_args:
-        return []
-    rects: List[RectHz] = []
-    for s in rect_args:
-        parts = [p.strip() for p in s.split(",")]
-        if len(parts) != 4:
-            raise ValueError(f"Bad --rect '{s}'. Use t0,t1,f0,f1 (seconds, Hz).")
-        t0, t1, f0, f1 = (float(parts[0]), float(parts[1]), float(parts[2]), float(parts[3]))
-        if t1 < t0:
-            t0, t1 = t1, t0
-        if f1 < f0:
-            f0, f1 = f1, f0
-        rects.append((t0, t1, f0, f1))
-    return rects
-
-
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--in_audio", type=str, required=True, help="Input audio (.wav/.m4a/etc.)")
     ap.add_argument("--out_wav", type=str, default="output.wav", help="Output wav filename (written to ./output/wav/)")
 
-    # Best practice: keep original sample rate unless explicitly requested.
     ap.add_argument("--sr", type=int, default=0, help="0=keep original sample rate; otherwise resample to this rate during conversion")
     ap.add_argument("--force_channels", type=int, default=0, help="0=keep; 1=mono; 2=stereo")
 
     ap.add_argument("--n_fft", type=int, default=2048)
     ap.add_argument("--hop", type=int, default=256)
-    ap.add_argument("--lifter_q", type=int, default=30)
+
+    ap.add_argument("--lifter_q", type=float, default=30.0)
     ap.add_argument("--mix", type=float, default=1.0)
+
+    ap.add_argument("--lifter_q_map", type=str, default=None, help='JSON dict: {"0.0": 20, "5.0": 40} (seconds->lifter_q)')
+    ap.add_argument("--mix_map", type=str, default=None, help='JSON dict: {"0.0": 0.2, "5.0": 1.0} (seconds->mix)')
+
     ap.add_argument("--stereo_mode", type=str, default="shared_envelope", choices=["per_channel", "shared_envelope"])
 
-    # Rectangles + plotting
     ap.add_argument("--rect", action="append", default=None, help="Rectangle selection: t0,t1,f0,f1 (seconds, Hz). Can be repeated.")
     ap.add_argument("--plot", action="store_true", help="Write a single PNG canvas showing input/selection/output spectrograms.")
     ap.add_argument("--plot_png", type=str, default="spectrogram_canvas.png", help="Output PNG filename (written to ./output/png/)")
@@ -368,6 +370,8 @@ def main() -> None:
         raise FileNotFoundError(in_path)
 
     rects = parse_rects(args.rect)
+    lifter_map = parse_time_map(args.lifter_q_map)
+    mix_map = parse_time_map(args.mix_map)
 
     want_sr: Optional[int] = None if int(args.sr) == 0 else int(args.sr)
     want_ch: Optional[int] = None if int(args.force_channels) == 0 else int(args.force_channels)
@@ -391,19 +395,20 @@ def main() -> None:
 
     exc = make_excitation_white(n_samples, channels)
 
-    y, Zs_plot, Ze_plot, Zout_plot, M = timbre_transfer_envelope(
+    y, Zs_plot, Ze_plot, Zout_plot, _M = timbre_transfer_envelope(
         source=src,
         excitation=exc,
         sr=sr,
         n_fft=int(args.n_fft),
         hop=int(args.hop),
-        lifter_quefrency_bins=int(args.lifter_q),
-        mix_env_amount=float(args.mix),
+        lifter_q_map=lifter_map,
+        mix_map=mix_map,
+        lifter_q_default=float(args.lifter_q),
+        mix_default=float(args.mix),
         stereo_mode=str(args.stereo_mode),
         rects=rects,
     )
 
-    # Normalize output
     peak = float(np.max(np.abs(y))) if y.size else 0.0
     if peak > 1e-8:
         y = y / peak * 0.95
@@ -414,25 +419,23 @@ def main() -> None:
     write_wav(out_wav_path, y, sr)
 
     if args.plot:
-        # We visualize the STFTs used for the transfer (channel 0 or mid depending on stereo_mode).
         src_db = stft_to_db(Zs_plot)
         exc_db = stft_to_db(Ze_plot)
         out_db = stft_to_db(Zout_plot)
 
-        # Temporary individual PNGs (one chart each), then stitch to one canvas image.
-        plot_dir = Path("./output/png")
-        plot_dir.mkdir(parents=True, exist_ok=True)
-        out_png_path = plot_dir / Path(args.plot_png).name
-        p1 = plot_dir / "_spec_input.png"
-        p2 = plot_dir / "_spec_excitation.png"
-        p3 = plot_dir / "_spec_output.png"
+        png_dir = Path("./output/png")
+        png_dir.mkdir(parents=True, exist_ok=True)
+        out_png_path = png_dir / Path(args.plot_png).name
+        p1 = png_dir / "_spec_input.png"
+        p2 = png_dir / "_spec_excitation.png"
+        p3 = png_dir / "_spec_output.png"
 
         plot_one_spectrogram_png(src_db, sr, int(args.n_fft), int(args.hop), "Input spectrogram (selection overlaid)", p1, rects)
         plot_one_spectrogram_png(exc_db, sr, int(args.n_fft), int(args.hop), "Excitation spectrogram (white noise)", p2, rects=[])
         plot_one_spectrogram_png(out_db, sr, int(args.n_fft), int(args.hop), "Output spectrogram (after timbre transfer)", p3, rects=[])
+
         stitch_pngs_vertical([p1, p2, p3], out_png_path)
 
-        # Clean up temp PNGs
         try:
             p1.unlink()
             p2.unlink()
