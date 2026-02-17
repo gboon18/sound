@@ -1,0 +1,33 @@
+# Audio files
+*.wav
+*.m4a
+*.mp3
+*.flac
+*.aac
+
+# Generated audio folders
+input/
+output/
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.so
+
+# Poetry
+poetry.lock
+.venv/
+.env
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+
+# Logs
+*.log
