@@ -217,3 +217,19 @@ You can also print the STFT frame count to understand time resolution:
 - By default, it keeps the original channel count (mono stays mono; stereo stays stereo).
 - You can force output channels during conversion using `--force_channels 1` or `--force_channels 2`.
 
+
+
+---
+
+# Sample rate policy (best practice)
+
+- If you pass a `.wav`, its sample rate is used as-is.
+- If you pass a non-wav input (e.g. `.m4a`), the tool converts it to `.wav` **keeping the original sample rate** (detected via `ffprobe`), unless you explicitly request resampling.
+
+To resample during conversion:
+
+```bash
+poetry run python scripts/timbre_transfer_stft_stereo.py --in_audio input.m4a --out_wav out.wav --sr 44100
+```
+
+Default behavior is `--sr 0` which means “keep original”.
