@@ -127,6 +127,7 @@ rgain 0.2
 Mappings:
 
 - `tempo <float>` → `/tempo`
+- `mgain <float>` → `/master/gain`
 - `bank <0|1>` → `/bank`
 - `pause <0|1>` → `/pause`
 - `lrev <0..1>` → `/left/rev`

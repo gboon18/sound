@@ -280,6 +280,8 @@ fun void rightPlayer()
 900.0 => float R_cutoff;
 3.0 => float R_q;
 
+0.8 => float M_gain; // master gain (0..1)
+
 // OSC receiver
 OscRecv recv;
 9000 => recv.port;
@@ -290,6 +292,7 @@ recv.event("/tempo, f") @=> OscEvent eTempo;
 recv.event("/bank, i") @=> OscEvent eBank;
 recv.event("/pause, i") @=> OscEvent ePause;
 recv.event("/chordBeats, i") @=> OscEvent eChordBeats;
+recv.event("/master/gain, f") @=> OscEvent eMGain;
 
 recv.event("/left/gain, f") @=> OscEvent eLGain;
 recv.event("/left/rev, f") @=> OscEvent eLRev;
@@ -320,6 +323,7 @@ fun void oscControl()
         {
             eTempo.getFloat() => float bpm;
             if(bpm >= 20.0 && bpm <= 300.0) bpm => gBPM;
+            <<< "OSC tempo:", gBPM >>>;
         }
 
         while(eBank.nextMsg() != 0)
@@ -340,6 +344,11 @@ fun void oscControl()
             if(cb >= 1 && cb <= 16) cb => gChordBeats;
         }
 
+        while(eMGain.nextMsg() != 0)
+        {
+            clamp01(eMGain.getFloat()) => M_gain;
+        }
+
         while(eLGain.nextMsg() != 0) clamp01(eLGain.getFloat()) => L_gain;
         while(eLRev.nextMsg()  != 0) clamp01(eLRev.getFloat())  => L_rev;
         while(eLCut.nextMsg()  != 0) eLCut.getFloat()           => L_cutoff;
@@ -358,6 +367,7 @@ fun void oscControl()
 
 Gain Lbus => dac.left;
 Gain Rbus => dac.right;
+
 
 // Rebuild players to route into buses (so we can control gain globally)
 fun void leftPlayer_bus()
@@ -383,6 +393,7 @@ fun void leftPlayer_bus()
         L_rev => rev.mix;
         L_cutoff => filt.freq;
         L_q => filt.Q;
+        M_gain => Lbus.gain;
 
         gChordTick => now;
 
@@ -435,6 +446,7 @@ fun void rightPlayer_bus()
         R_rev => rev.mix;
         R_cutoff => filt.freq;
         R_q => filt.Q;
+        M_gain => Rbus.gain;
 
         gChordTick => now;
 

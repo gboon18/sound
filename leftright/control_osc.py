@@ -24,6 +24,7 @@ Commands:
   bank <0|1>               e.g. bank 1
   pause <0|1>              e.g. pause 1
   chordbeats <int>         e.g. chordbeats 4
+  mgain <0..1>              e.g. mgain 0.8
 
   lrev <0..1>              e.g. lrev 0.25
   lgain <0..1>             e.g. lgain 0.2
@@ -70,6 +71,10 @@ Commands:
             elif cmd in {"chordbeats", "cb"}:
                 v = int(val_s)
                 client.send_message("/chordBeats", v)
+
+            elif cmd == "mgain":
+                v = clamp01(float(val_s))
+                client.send_message("/master/gain", v)
 
             elif cmd == "lrev":
                 v = clamp01(float(val_s))
