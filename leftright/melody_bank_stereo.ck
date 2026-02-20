@@ -207,7 +207,8 @@ fun void leftPlayer()
 fun void rightPlayer()
 {
     // signal chain (right only) - different "space/distance"
-    SawOsc osc => ADSR env => BPF filt => NRev rev => Gain g => dac.right;
+    // SawOsc osc => ADSR env => BPF filt => NRev rev => Gain g => dac.right;
+    TriOsc osc => ADSR env => BPF filt => NRev rev => Gain g => dac.right;
 
     0.20 => g.gain;
     900.0 => filt.freq;

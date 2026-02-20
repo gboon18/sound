@@ -1,6 +1,7 @@
 [project]
 name = "leftright"
 version = "0.1.0"
+package-mode = false
 description = ""
 authors = [
     {name = "HoSan Ko",email = "hko@avalanche.energy"}
