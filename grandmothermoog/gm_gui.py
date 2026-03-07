@@ -15,6 +15,7 @@ import tkinter as tk
 from tkinter import ttk
 import math
 import os
+import platform
 import queue
 import re
 import threading
@@ -27,6 +28,71 @@ try:
     import sounddevice as sd
 except ImportError:
     sd = None
+
+
+class AudioCapture:
+    """Single shared audio input stream. Dispatches mono chunks to subscribers.
+
+    On Windows, tries WASAPI loopback on the default output device so all
+    visualisers capture what ChucK is actually playing.
+    """
+
+    SAMPLE_RATE = 44100
+    CHUNK       = 1024
+
+    def __init__(self):
+        self._subs   = []          # list of queue.Queue
+        self._stream = None
+        if sd is None:
+            return
+        ok = False
+        if platform.system() == "Windows":
+            try:
+                out_idx  = sd.default.device[1]
+                out_info = sd.query_devices(out_idx)
+                n_ch     = min(int(out_info.get("max_output_channels", 2)), 2)
+                self._n_ch = n_ch
+                extra    = sd.WasapiSettings(loopback=True)
+                self._stream = sd.InputStream(
+                    device=out_idx, channels=n_ch,
+                    samplerate=self.SAMPLE_RATE, blocksize=self.CHUNK,
+                    callback=self._cb, extra_settings=extra,
+                    dtype="float32",
+                )
+                ok = True
+            except Exception:
+                pass
+        if not ok:
+            self._n_ch = 1
+            self._stream = sd.InputStream(
+                samplerate=self.SAMPLE_RATE, channels=1,
+                blocksize=self.CHUNK, callback=self._cb,
+                dtype="float32",
+            )
+        self._stream.start()
+
+    def subscribe(self):
+        """Return a queue.Queue that receives mono float32 chunks."""
+        q = queue.Queue(maxsize=16)
+        self._subs.append(q)
+        return q
+
+    def _cb(self, indata, _f, _t, _s):
+        mono = indata.mean(axis=1) if indata.shape[1] > 1 else indata[:, 0]
+        chunk = mono.copy()
+        for q in self._subs:
+            try:
+                q.put_nowait(chunk)
+            except queue.Full:
+                pass
+
+    def stop(self):
+        if self._stream is not None:
+            self._stream.stop()
+
+
+_audio = AudioCapture()
+
 
 try:
     from pythonosc import udp_client
@@ -146,6 +212,202 @@ class Knob(tk.Canvas):
         return self._val
 
 
+# ─── Live spectrum analyzer ───────────────────────────────────────────────────
+
+class LiveSpectrum(tk.Frame):
+    """Real-time FFT spectrum: frequency (log, x) vs dB magnitude (y).
+
+    step_source: optional callable → int  (current sequencer step, -1 if idle)
+    A thin orange strip at the top highlights which of the 16 steps is active.
+    """
+
+    SAMPLE_RATE = 44100
+    CHUNK       = 1024
+    N_FFT       = 2048
+    F_MIN       = 30.0
+    F_MAX       = 10000.0
+    DB_FLOOR    = -70.0
+    DB_RANGE    = 60.0     # dB window shown below adaptive ceiling
+    PEAK_DECAY  = 1.5      # dB lost per rendered frame for peak-hold dots
+
+    _CMAP = np.array([
+        [0.00, 0x0a, 0x0a, 0x18],
+        [0.25, 0x0d, 0x3d, 0x6e],
+        [0.55, 0x11, 0x88, 0x55],
+        [0.80, 0xff, 0x66, 0x00],
+        [1.00, 0xff, 0xff, 0x88],
+    ], dtype=np.float32)
+
+    def __init__(self, parent, step_source=None, **kwargs):
+        super().__init__(parent, bg="#0a0a18", **kwargs)
+        self._step_source = step_source
+
+        # ── controls row ─────────────────────────────────────────────────────
+        ctrl = tk.Frame(self, bg="#0a0a18")
+        ctrl.pack(fill="x", padx=4, pady=(4, 1))
+
+        tk.Label(ctrl, text="FPS", fg="#ccccee", bg="#0a0a18",
+                 font=("Courier", 8, "bold")).pack(side="left", padx=(0, 3))
+        self._fps_var = tk.StringVar(value="30")
+        ttk.Combobox(ctrl, textvariable=self._fps_var,
+                     values=["60", "30", "20", "10", "5", "2"],
+                     width=4, state="readonly", font=("Courier", 8)
+                     ).pack(side="left")
+
+        tk.Label(ctrl, text="  PEAK HOLD", fg="#556677", bg="#0a0a18",
+                 font=("Courier", 7)).pack(side="left", padx=(10, 2))
+        self._peak_on = tk.BooleanVar(value=True)
+        tk.Checkbutton(ctrl, variable=self._peak_on, bg="#0a0a18",
+                       activebackground="#0a0a18", selectcolor="#1a1a2e",
+                       relief="flat").pack(side="left")
+
+        tk.Label(ctrl,
+                 text="   x-axis: 30 Hz – 10 kHz (log)   y-axis: dB   "
+                      "orange strip = active step",
+                 fg="#334455", bg="#0a0a18", font=("Courier", 6)
+                 ).pack(side="left", padx=8)
+
+        # ── canvas ───────────────────────────────────────────────────────────
+        CW, CH     = 620, 140
+        self._OX   = 22        # left margin for dB labels
+        self._HBAR = CH - 16   # height of bar area (bottom 16px = freq labels)
+        self._CW, self._CH = CW, CH
+
+        self._cv = tk.Canvas(self, width=CW, height=CH,
+                             bg="#0a0a18", highlightthickness=0)
+        self._cv.pack(padx=4, pady=(0, 4))
+
+        # ── frequency-bin → bar mapping ──────────────────────────────────────
+        N = CW - self._OX - 4          # number of display bars
+        self._N = N
+        freqs = np.fft.rfftfreq(self.N_FFT, 1.0 / self.SAMPLE_RATE)
+        edges = np.logspace(np.log10(self.F_MIN), np.log10(self.F_MAX), N + 1)
+        lo = np.searchsorted(freqs, edges[:-1]).clip(0, len(freqs) - 2)
+        hi = np.maximum(np.searchsorted(freqs, edges[1:]), lo + 1).clip(0, len(freqs))
+        self._lo, self._hi = lo, hi
+
+        self._bar_db   = np.full(N, self.DB_FLOOR, dtype=np.float32)
+        self._peak_db  = np.full(N, self.DB_FLOOR, dtype=np.float32)
+        self._disp_top = self.DB_FLOOR + self.DB_RANGE   # adaptive ceiling
+        self._photo    = None
+
+        # ── audio ─────────────────────────────────────────────────────────────
+        self._q = _audio.subscribe()
+
+        self._tick()
+
+    def _tick(self):
+        try:
+            fps = float(self._fps_var.get())
+        except (ValueError, tk.TclError):
+            fps = 30.0
+        interval = max(16, int(1000.0 / fps))
+
+        chunk = None
+        while True:
+            try:
+                chunk = self._q.get_nowait()
+            except queue.Empty:
+                break
+
+        try:
+            if chunk is not None:
+                mag = np.abs(np.fft.rfft(chunk, n=self.N_FFT))
+                sums   = np.add.reduceat(mag, self._lo)
+                counts = np.maximum(self._hi - self._lo, 1).astype(np.float32)
+                self._bar_db = (20.0 * np.log10(sums / counts + 1e-8)).astype(np.float32)
+
+                p = float(np.max(self._bar_db))
+                if p > self._disp_top:
+                    self._disp_top = p
+                else:
+                    self._disp_top = self._disp_top * 0.997 + p * 0.003
+
+                if self._peak_on.get():
+                    up = self._bar_db > self._peak_db
+                    self._peak_db[up]  = self._bar_db[up]
+                    self._peak_db[~up] -= self.PEAK_DECAY
+
+                self._render()
+        except Exception as e:
+            import traceback
+            print("LiveSpectrum error:", e)
+            traceback.print_exc()
+        finally:
+            self.after(interval, self._tick)
+
+    def _render(self):
+        H  = self._HBAR
+        W  = self._CW
+        OX = self._OX
+        N  = self._N
+        top  = self._disp_top
+        bot  = top - self.DB_RANGE
+
+        img = np.zeros((H + 16, W, 3), dtype=np.uint8)
+        img[:, :] = [0x0a, 0x0a, 0x18]
+
+        norm     = np.clip((self._bar_db - bot) / self.DB_RANGE, 0.0, 1.0)
+        bar_tops = np.clip(H - (norm * H).astype(int), 0, H)
+
+        c  = self._CMAP
+        rs = np.interp(norm, c[:, 0], c[:, 1]).astype(np.uint8)
+        gs = np.interp(norm, c[:, 0], c[:, 2]).astype(np.uint8)
+        bs = np.interp(norm, c[:, 0], c[:, 3]).astype(np.uint8)
+
+        # vectorised vertical bar fill
+        y_idx  = np.arange(H, dtype=np.int32)[:, np.newaxis]
+        mask   = y_idx >= bar_tops[np.newaxis, :]
+        region = img[0:H, OX:OX + N]
+        region[:, :, 0] = np.where(mask, rs[np.newaxis, :], 0x0a)
+        region[:, :, 1] = np.where(mask, gs[np.newaxis, :], 0x0a)
+        region[:, :, 2] = np.where(mask, bs[np.newaxis, :], 0x18)
+
+        # faint dB grid lines (relative to adaptive window)
+        for frac in (0.25, 0.5, 0.75):
+            gy = int((1.0 - frac) * H)
+            if 0 <= gy < H:
+                img[gy, OX:OX + N] = [0x1a, 0x1a, 0x28]
+
+        # peak-hold dots (vectorised)
+        if self._peak_on.get():
+            pn = np.clip((self._peak_db - bot) / self.DB_RANGE, 0.0, 1.0)
+            py = np.clip(H - (pn * H).astype(int), 0, H - 1)
+            xs = np.arange(N) + OX
+            img[py, xs, 0] = 0xff
+            img[py, xs, 1] = 0x66
+            img[py, xs, 2] = 0x00
+
+        # 16-step indicator strip (4px at top)
+        if self._step_source is not None:
+            step = self._step_source()
+            if step >= 0:
+                sw = max(N // 16, 1)
+                for s in range(16):
+                    col = [0xff, 0x66, 0x00] if s == step else [0x1a, 0x1a, 0x2e]
+                    img[0:4, OX + s * sw: OX + s * sw + sw - 1] = col
+
+        self._photo = ImageTk.PhotoImage(Image.fromarray(img, "RGB"))
+        self._cv.delete("all")
+        self._cv.create_image(0, 0, anchor="nw", image=self._photo)
+
+        # axis text labels
+        log_min = np.log10(self.F_MIN)
+        log_rng = np.log10(self.F_MAX) - log_min
+        for freq, lbl in [(50,"50"),(100,"100"),(200,"200"),(500,"500"),
+                          (1000,"1k"),(2000,"2k"),(5000,"5k"),(10000,"10k")]:
+            if self.F_MIN <= freq <= self.F_MAX:
+                x = int((np.log10(freq) - log_min) / log_rng * N) + OX
+                self._cv.create_text(x, H + 8, text=lbl,
+                                     fill="#445566", font=("Courier", 5))
+        # dB labels: show actual dB values at 25/50/75% marks
+        for frac, offset in ((0.75, 0), (0.5, 0), (0.25, 0)):
+            db_v = bot + frac * self.DB_RANGE
+            y    = int((1.0 - frac) * H)
+            self._cv.create_text(OX - 2, y, text=f"{db_v:.0f}",
+                                 fill="#334455", font=("Courier", 5), anchor="e")
+
+
 # ─── Signal-flow diagram ──────────────────────────────────────────────────────
 
 class PatchDiagram(tk.Canvas):
@@ -259,6 +521,7 @@ class StepSequencer(tk.Frame):
         self._running    = False
         self._thread     = None
         self._last_midi  = None
+        self._cur_step   = -1
         self._bpm_var    = tk.StringVar(value="120")
         self._step_vars  = [tk.StringVar(value=self._DEFAULT[i])
                             for i in range(self.STEPS)]
@@ -361,6 +624,7 @@ class StepSequencer(tk.Frame):
         self.after(0, self._highlight, -1)
 
     def _highlight(self, step):
+        self._cur_step = step
         for i, e in enumerate(self._cells):
             e.config(bg="#ff6600" if i == step else "#2d2d44")
 
@@ -383,6 +647,72 @@ class StepSequencer(tk.Frame):
 
 
 # ─── Spectrogram widget ───────────────────────────────────────────────────────
+
+class Oscilloscope(tk.Frame):
+    """Real-time time-domain waveform (amplitude vs time)."""
+
+    SAMPLE_RATE = 44100
+    CHUNK       = 1024
+    UPDATE_MS   = 33     # ~30 fps
+
+    def __init__(self, parent, **kwargs):
+        super().__init__(parent, bg="#0a0a18", **kwargs)
+
+        CW, CH    = 620, 80
+        self._CW  = CW
+        self._CH  = CH
+
+        self._cv = tk.Canvas(self, width=CW, height=CH,
+                             bg="#0a0a18", highlightthickness=0)
+        self._cv.pack(padx=4, pady=(2, 4))
+
+        # pre-draw grid
+        mid = CH // 2
+        self._cv.create_line(0, mid, CW, mid, fill="#1a1a28", width=1)
+        for y in (mid // 2, mid + mid // 2):
+            self._cv.create_line(0, y, CW, y, fill="#111120", width=1)
+
+        self._buf = np.zeros(CW, dtype=np.float32)
+        self._q   = _audio.subscribe()
+        self._line_id = None
+
+        self._tick()
+
+    def _tick(self):
+        chunk = None
+        while True:
+            try:
+                chunk = self._q.get_nowait()
+            except queue.Empty:
+                break
+
+        if chunk is not None:
+            # keep a rolling window the width of the canvas
+            n = min(len(chunk), self._CW)
+            self._buf = np.roll(self._buf, -n)
+            self._buf[-n:] = chunk[:n]
+            self._render()
+
+        self.after(self.UPDATE_MS, self._tick)
+
+    def _render(self):
+        CW, CH = self._CW, self._CH
+        mid    = CH / 2
+        amp    = (CH / 2) * 0.9   # 90 % of half-height
+
+        ys = mid - np.clip(self._buf, -1.0, 1.0) * amp
+        xs = np.arange(CW, dtype=np.float32)
+
+        coords = np.empty(CW * 2, dtype=np.float32)
+        coords[0::2] = xs
+        coords[1::2] = ys
+
+        if self._line_id is not None:
+            self._cv.delete(self._line_id)
+        self._line_id = self._cv.create_line(
+            coords.tolist(), fill="#00ff88", width=1, smooth=False
+        )
+
 
 class Spectrogram(tk.Canvas):
     """Scrolling waterfall spectrogram. Captures from default audio input."""
@@ -421,24 +751,12 @@ class Spectrogram(tk.Canvas):
             np.log10(self.F_MIN), np.log10(self.F_MAX), height
         )
 
-        if sd is not None:
-            self._stream = sd.InputStream(
-                samplerate=self.SAMPLE_RATE, channels=1,
-                blocksize=self.CHUNK, callback=self._cb
-            )
-            self._stream.start()
-            self.bind("<Destroy>", lambda _: self._stream.stop())
-        else:
+        self._q = _audio.subscribe()
+        if _audio._stream is None:
             self.create_text(width // 2, height // 2,
                              text="sounddevice not available",
                              fill="#667788", font=("Courier", 9))
         self._tick()
-
-    def _cb(self, indata, _frames, _time, _status):
-        try:
-            self._q.put_nowait(indata[:, 0].copy())
-        except queue.Full:
-            pass
 
     def _tick(self):
         new_cols = []
@@ -530,7 +848,7 @@ def build():
     root = tk.Tk()
     root.title("GrandMotherMoog")
     root.configure(bg="#1a1a2e")
-    root.resizable(False, False)
+    root.resizable(True, True)
 
     # ttk combobox dark style
     style = ttk.Style()
@@ -542,10 +860,47 @@ def build():
     style.map("TCombobox", fieldbackground=[("readonly", "#2d2d44")],
               foreground=[("readonly", "#ddddff")])
 
-    # ── Title ──────────────────────────────────────────────────────────────
+    # ── Title (fixed, outside scroll area) ─────────────────────────────────
     tk.Label(root, text="  GRANDMOTHER MOOG  ",
              bg="#0d0d1a", fg="#ff6600",
              font=("Courier", 13, "bold"), pady=6).pack(fill="x")
+
+    # ── Scrollable body ─────────────────────────────────────────────────────
+    _scroll_cv = tk.Canvas(root, bg="#1a1a2e", highlightthickness=0)
+    _vbar = tk.Scrollbar(root, orient="vertical", command=_scroll_cv.yview)
+    _scroll_cv.configure(yscrollcommand=_vbar.set)
+    _vbar.pack(side="right", fill="y")
+    _scroll_cv.pack(side="left", fill="both", expand=True)
+
+    # inner frame — all rows go here instead of root
+    _body = tk.Frame(_scroll_cv, bg="#1a1a2e")
+    _body_id = _scroll_cv.create_window((0, 0), window=_body, anchor="nw")
+
+    def _on_body_configure(event):
+        _scroll_cv.configure(scrollregion=_scroll_cv.bbox("all"))
+        _scroll_cv.itemconfig(_body_id, width=_scroll_cv.winfo_width())
+
+    def _on_canvas_configure(event):
+        _scroll_cv.itemconfig(_body_id, width=event.width)
+
+    _body.bind("<Configure>", _on_body_configure)
+    _scroll_cv.bind("<Configure>", _on_canvas_configure)
+
+    # mouse-wheel scroll (Windows + Linux)
+    def _on_mousewheel(event):
+        _scroll_cv.yview_scroll(int(-1 * (event.delta / 120)), "units")
+
+    root.bind_all("<MouseWheel>", _on_mousewheel)
+
+    # use _body as the parent for all rows (was root)
+    # set initial window size to 80% of screen height
+    _real_root = _body.winfo_toplevel()
+    _real_root.update_idletasks()
+    sw = _real_root.winfo_screenwidth()
+    sh = _real_root.winfo_screenheight()
+    _real_root.geometry(f"{min(sw, 720)}x{int(sh * 0.80)}")
+
+    root = _body  # shadow name so all existing code below is unchanged
 
     # ── Row 1 : VCO 1 / VCO 2 / MIXER / GLIDE ─────────────────────────────
     r1 = tk.Frame(root, bg="#1a1a2e")
@@ -677,20 +1032,31 @@ def build():
     # ── Row 5 : Step Sequencer ──────────────────────────────────────────────
     sq = section(root, "STEP SEQUENCER  ( 16 × 1/16 note )")
     sq.pack(fill="x", padx=6, pady=3)
-    StepSequencer(sq).pack(fill="x", padx=4, pady=2)
+    _seq = StepSequencer(sq)
+    _seq.pack(fill="x", padx=4, pady=2)
 
-    # ── Row 6 : Spectrogram ─────────────────────────────────────────────────
+    # ── Row 6 : Live Spectrum ────────────────────────────────────────────────
+    ls = section(root, "LIVE SPECTRUM  ( freq → dB )")
+    ls.pack(fill="x", padx=6, pady=3)
+    LiveSpectrum(ls, step_source=lambda: _seq._cur_step).pack(padx=4, pady=2)
+
+    # ── Row 7 : Oscilloscope ────────────────────────────────────────────────
+    ow = section(root, "WAVEFORM  ( time → amplitude )")
+    ow.pack(fill="x", padx=6, pady=3)
+    Oscilloscope(ow).pack(padx=4, pady=2)
+
+    # ── Row 8 : Spectrogram ─────────────────────────────────────────────────
     sp = section(root, "SPECTROGRAM  ( time →  |  30 Hz – 10 kHz log )")
     sp.pack(fill="x", padx=6, pady=3)
     Spectrogram(sp).pack(padx=4, pady=4)
 
-    # ── Status bar ─────────────────────────────────────────────────────────
-    tk.Label(root,
+    # ── Status bar (fixed, outside scroll — attach to real root via _body.master) ──
+    tk.Label(root.master,
              text=f"OSC -> {OSC_IP}:{OSC_PORT}   |   drag up/down   |   double-click resets",
              bg="#0d0d1a", fg="#555577", font=("Courier", 7), pady=3
-             ).pack(fill="x")
+             ).pack(fill="x", side="bottom")
 
-    root.mainloop()
+    root.master.mainloop()
 
 
 if __name__ == "__main__":
