@@ -354,6 +354,12 @@ gm.setNoise(0.02);
 gm.setReverb(10);
 gm.setGlideMs(35);
 
+// ─ Recording tap (WvOut off by default; enabled via /gm/record/start) ─
+WvOut recOut;
+Gain  recTap;
+gm => recTap => recOut => blackhole;
+0.0 => recTap.gain;
+
 // ---- OSC listener (receives from gm_gui.py on port 9000) ----
 fun void oscLoop()
 {
@@ -386,6 +392,8 @@ fun void oscLoop()
     oin.addAddress("/gm/filtR, f");
     oin.addAddress("/gm/seq/noteon, i");
     oin.addAddress("/gm/seq/noteoff, i");
+    oin.addAddress("/gm/record/start, s");
+    oin.addAddress("/gm/record/stop, i");
 
     while(true)
     {
@@ -419,6 +427,16 @@ fun void oscLoop()
             // sequencer: GUI sends absolute MIDI note; adjust for baseOffset (48)
             if(omsg.address == "/gm/seq/noteon")  gm.noteOn(omsg.getInt(0) - gm.baseOffset, 100);
             if(omsg.address == "/gm/seq/noteoff") gm.noteOff(gm.lastNote);
+            // recording
+            if(omsg.address == "/gm/record/start") {
+                omsg.getString(0) => string rpath;
+                rpath => recOut.wavFilename;
+                1.0 => recTap.gain;
+            }
+            if(omsg.address == "/gm/record/stop") {
+                recOut.closeFile();
+                0.0 => recTap.gain;
+            }
         }
     }
 }

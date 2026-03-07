@@ -14,6 +14,7 @@ Usage:
 import tkinter as tk
 from tkinter import ttk
 import math
+import os
 import queue
 import re
 import threading
@@ -43,6 +44,10 @@ def send(addr, val):
 
 def send_int(addr, val):
     _client.send_message(addr, int(val))
+
+
+def send_str(addr, val):
+    _client.send_message(addr, str(val))
 
 
 # ─── Knob widget ──────────────────────────────────────────────────────────────
@@ -139,6 +144,101 @@ class Knob(tk.Canvas):
 
     def get(self):
         return self._val
+
+
+# ─── Signal-flow diagram ──────────────────────────────────────────────────────
+
+class PatchDiagram(tk.Canvas):
+    """Static signal-flow diagram showing the GrandMotherVoice patch."""
+
+    def __init__(self, parent, width=660, height=155, **kwargs):
+        super().__init__(parent, width=width, height=height,
+                         bg="#0a0a18", highlightthickness=0, **kwargs)
+        self._draw()
+
+    def _box(self, x, y, w, h, fc, oc, t1, t2=None):
+        self.create_rectangle(x, y, x+w, y+h, fill=fc, outline=oc, width=1)
+        ty = y + h//2 - (5 if t2 else 0)
+        self.create_text(x+w//2, ty, text=t1, fill=oc, font=("Courier", 7, "bold"))
+        if t2:
+            self.create_text(x+w//2, y+h//2+5, text=t2,
+                             fill="#556677", font=("Courier", 6))
+
+    def _arr(self, x1, y1, x2, y2, c="#334455", dash=None):
+        kw = dict(fill=c, arrow="last", arrowshape=(5, 7, 3), width=1)
+        if dash:
+            kw["dash"] = dash
+        self.create_line(x1, y1, x2, y2, **kw)
+
+    def _draw(self):
+        OSC = ("#0c1a0c", "#44aa55")   # oscillators
+        MXR = ("#0c0c1a", "#4455bb")   # mix / routing
+        FLT = ("#1a1006", "#cc7722")   # filter / drive
+        ENV = ("#1a0808", "#cc4444")   # envelopes
+        FX  = ("#0a1220", "#4488cc")   # limiter / reverb
+        OUT = ("#061616", "#33aaaa")   # output
+        MOD = ("#181806", "#aaaa33")   # modulation
+        AC  = "#334455"                # audio-path arrow
+        MC  = "#887733"                # modulation arrow
+
+        # ─ Row 1 : sources (y=10) ───────────────────────────────────────────
+        self._box(6,   10, 62, 28, *OSC, "VCO 1", "TRI/SAW/SQR")
+        self._box(74,  10, 62, 28, *OSC, "VCO 2", "+DETUNE")
+        self._box(142, 10, 62, 28, *MXR, "NOISE", "& EXT IN")
+
+        # source bus: vertical drops → horizontal line → arrow to MIX
+        for cx in (37, 105, 173):
+            self.create_line(cx, 38, cx, 48, fill=AC, width=1)
+        self.create_line(37, 48, 173, 48, fill=AC, width=1)
+        self._arr(105, 48, 105, 57, AC)
+
+        # ─ Row 2 : main audio chain (y=57..85, center y=71) ─────────────────
+        CY = 71
+        chain = [
+            # x,   w,   fc,  oc,  label,    sub
+            (83,   44,  *MXR, "MIX",     None),
+            (133,  44,  *FLT, "DRIVE",   None),
+            (183,  54,  *FLT, "FILTER",  "4×LPF"),
+            (243,  54,  *ENV, "AMP ENV", "ADSR"),
+            (303,  38,  *ENV, "VEL",     None),
+            (347,  54,  *FX,  "LIMITER", "∞:1"),
+            (407,  48,  *FX,  "REVERB",  None),
+            (461,  40,  *OUT, "DAC",     "OUT"),
+        ]
+        prev_rx = None
+        for x, w, fc, oc, lbl, sub in chain:
+            self._box(x, 57, w, 28, fc, oc, lbl, sub)
+            if prev_rx is not None:
+                self._arr(prev_rx, CY, x, CY, AC)
+            prev_rx = x + w
+
+        # ─ Row 3 : modulation sources (y=108) ───────────────────────────────
+        FILT_CX = 183 + 27   # center-x of FILTER box = 210
+        self._box(6,   108, 80, 28, *MOD, "LFO", "→PITCH  →CUTOFF")
+        self._box(183, 108, 54, 28, *MOD, "FILT ENV", "ADSR →CUTOFF")
+
+        # FILT ENV → FILTER (dashed upward)
+        self._arr(FILT_CX, 108, FILT_CX, 85, MC, dash=(4, 3))
+
+        # LFO → VCO pitch (dashed vertical to VCO row)
+        self._arr(37, 108, 37, 38, "#666633", dash=(3, 3))
+        # LFO → FILTER cutoff (dashed horizontal + up)
+        self.create_line(86, 120, FILT_CX - 8, 120,
+                         fill="#666633", dash=(3, 3), width=1)
+        self._arr(FILT_CX - 8, 120, FILT_CX - 8, 85, "#666633", dash=(3, 3))
+
+        # ─ Legend ────────────────────────────────────────────────────────────
+        legend = [
+            (530, "#44aa55", "OSC"),
+            (560, "#cc7722", "FILT"),
+            (595, "#cc4444", "ENV"),
+            (625, "#4488cc", "FX"),
+            (650, "#aaaa33", "MOD"),
+        ]
+        for lx, lc, lt in legend:
+            self.create_rectangle(lx, 142, lx+8, 150, fill=lc, outline=lc)
+            self.create_text(lx+10, 146, text=lt, fill="#556677",
+                             font=("Courier", 6), anchor="w")
 
 
 # ─── Step Sequencer widget ────────────────────────────────────────────────────
@@ -534,12 +634,52 @@ def build():
         ("REVERB", 0, 100, 10, "/gm/reverb", ".0f"),
     ])
 
-    # ── Row 4 : Step Sequencer ──────────────────────────────────────────────
+    # ── Row 4 : Signal Flow + Record ────────────────────────────────────────
+    sf = section(root, "SIGNAL FLOW")
+    sf.pack(fill="x", padx=6, pady=3)
+    PatchDiagram(sf).pack(padx=4, pady=(4, 2))
+
+    # record bar
+    rb = tk.Frame(sf, bg="#1a1a2e")
+    rb.pack(fill="x", padx=4, pady=(0, 4))
+
+    tk.Label(rb, text="REC →  output/", fg="#556677", bg="#1a1a2e",
+             font=("Courier", 8)).pack(side="left", padx=(2, 0))
+    _fname = tk.StringVar(value="recording")
+    tk.Entry(rb, textvariable=_fname, width=14,
+             bg="#2d2d44", fg="#ddddff", insertbackground="#ff6600",
+             font=("Courier", 9), relief="flat", justify="left"
+             ).pack(side="left")
+    tk.Label(rb, text=".wav", fg="#556677", bg="#1a1a2e",
+             font=("Courier", 8)).pack(side="left", padx=(0, 10))
+
+    _recording = [False]
+
+    def _toggle_rec():
+        if _recording[0]:
+            send_int("/gm/record/stop", 0)
+            _recording[0] = False
+            _rec_btn.config(text="● REC", bg="#1a0d0d", fg="#cc4444",
+                            activebackground="#2a1010")
+        else:
+            fname = _fname.get().strip() or "recording"
+            os.makedirs("output", exist_ok=True)
+            send_str("/gm/record/start", "output/" + fname + ".wav")
+            _recording[0] = True
+            _rec_btn.config(text="■ STOP REC", bg="#4a0000", fg="#ff3333",
+                            activebackground="#5a1010")
+
+    _rec_btn = tk.Button(rb, text="● REC", command=_toggle_rec,
+                         bg="#1a0d0d", fg="#cc4444", activebackground="#2a1010",
+                         font=("Courier", 8, "bold"), relief="flat", padx=8, pady=2)
+    _rec_btn.pack(side="left")
+
+    # ── Row 5 : Step Sequencer ──────────────────────────────────────────────
     sq = section(root, "STEP SEQUENCER  ( 16 × 1/16 note )")
     sq.pack(fill="x", padx=6, pady=3)
     StepSequencer(sq).pack(fill="x", padx=4, pady=2)
 
-    # ── Row 5 : Spectrogram ─────────────────────────────────────────────────
+    # ── Row 6 : Spectrogram ─────────────────────────────────────────────────
     sp = section(root, "SPECTROGRAM  ( time →  |  30 Hz – 10 kHz log )")
     sp.pack(fill="x", padx=6, pady=3)
     Spectrogram(sp).pack(padx=4, pady=4)
