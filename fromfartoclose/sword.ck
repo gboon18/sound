@@ -23,13 +23,13 @@ class Voice
     Pan2   pan;
     Gain   outG;
 
-    // init chain: (input + noise) -> BPF -> HPF -> ADSR -> Pan2 -> Gain
-    fun void init(Gain src, Gain wetBus)
+    // init chain: (input + noise) -> BPF -> HPF -> ADSR -> Gain -> Pan2
+    fun void init(Gain src)
     {
         src => inTap => sum;
         nz => nzG => sum;
 
-        sum => bpf => hpf => env => pan => outG => wetBus;
+        sum => bpf => hpf => env => outG => pan;
 
         // defaults for safety
         0.0 => nzG.gain;
@@ -63,8 +63,8 @@ public class SwordSwish extends Chugraph
     // patch points
     inlet => Gain _dryTap;
 
-    // wet mix bus -> reverb -> outlet
-    Gain _wetBus => JCRev _rev => Gain _out => outlet;
+    // reverb -> outlet (voices connect Pan2 directly to outlet for stereo)
+    JCRev _rev => outlet;
 
     // user parameters (human input variables)
     dur   swingDur;        // duration of one swing (e.g., 0.5::second)
@@ -128,8 +128,6 @@ public class SwordSwish extends Chugraph
         0.08 => revMix;
 
         // output stages
-        wetGain => _wetBus.gain;
-        1.0 => _out.gain;
         revMix => _rev.mix;
 
         // allocate and patch voices
@@ -137,9 +135,11 @@ public class SwordSwish extends Chugraph
         for (0 => int i; i < nVoices; i++)
         {
             Voice vv;
-            vv.init(_dryTap, _wetBus);
+            vv.init(_dryTap);
+            vv.pan => outlet;   // stereo direct path
+            vv.pan => _rev;     // also feed reverb (mono sum is fine here)
             vv.setStatic(bpfQ, hpfCut);
-            vv.setGains(inGain, noiseGain, 1.0);
+            vv.setGains(inGain, noiseGain, wetGain);
             vv.setEnv(atk, dec, sus, rel);
             _v << vv;
         }
@@ -169,7 +169,11 @@ public class SwordSwish extends Chugraph
         x => noiseGain;
         for (0 => int i; i < nVoices; i++) { noiseGain => _v[i].nzG.gain; }
     }
-    fun void setWetGain(float x)     { x => wetGain; wetGain => _wetBus.gain; }
+    fun void setWetGain(float x)
+    {
+        x => wetGain;
+        for (0 => int i; i < nVoices; i++) { wetGain => _v[i].outG.gain; }
+    }
 
     fun void setBpf(float loHz, float hiHz, float q)
     {
@@ -299,8 +303,8 @@ public class SwordSwish extends Chugraph
 // ============================================================
 
 // Human input variables (edit these)
-0.5::second => dur   SWING_DUR;
-0.25::second => dur  OFFSET_DUR;
+5::second => dur   SWING_DUR;
+0.5::second => dur  OFFSET_DUR;
 
 900.0  => float BPF_LO;
 4500.0 => float BPF_HI;

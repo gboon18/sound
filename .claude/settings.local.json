@@ -1,7 +1,22 @@
 {
   "permissions": {
     "allow": [
-      "Bash(\"/c/Users/hko/AppData/Local/Microsoft/WinGet/Packages/Gyan.FFmpeg_Microsoft.Winget.Source_8wekyb3d8bbwe/ffmpeg-8.0.1-full_build/bin/ffmpeg.exe\" -version)"
+      "Bash(\"/c/Users/hko/AppData/Local/Microsoft/WinGet/Packages/Gyan.FFmpeg_Microsoft.Winget.Source_8wekyb3d8bbwe/ffmpeg-8.0.1-full_build/bin/ffmpeg.exe\" -version)",
+      "Bash(poetry config virtualenvs.in-project true)",
+      "Bash(poetry install)",
+      "Bash(poetry env info)",
+      "Bash(poetry config --list)",
+      "Bash(poetry env use python)",
+      "Bash(where python)",
+      "Bash(pyenv versions)",
+      "Bash(pyenv which python)",
+      "Bash(poetry env use \"C:\\\\Users\\\\HoSanKo\\\\.pyenv\\\\pyenv-win\\\\versions\\\\3.12.10\\\\python.exe\")",
+      "Bash(echo \"VIRTUAL_ENV=$VIRTUAL_ENV\")",
+      "Bash(echo \"CONDA_DEFAULT_ENV=$CONDA_DEFAULT_ENV\")",
+      "Bash(poetry env info --path)",
+      "Bash(unset VIRTUAL_ENV)",
+      "Bash(poetry add sounddevice)",
+      "Bash(poetry lock)"
     ]
   }
 }

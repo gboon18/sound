@@ -64,8 +64,12 @@ public class GrandMotherVoice extends Chugraph
         outLim.limit();
         0::ms  => outLim.attackTime;   // instantaneous attack: no transient slips through
         20::ms => outLim.releaseTime;  // fast recovery
-        0.80   => outLim.thresh;       // -2 dBFS ceiling with some headroom
+        0.80   => outLim.thresh;       // ceiling
+        0.0    => outLim.slopeAbove;   // CRUCIAL: infinite ratio (true hard limit, not 10:1)
         1.0    => outLim.gain;         // neutral output gain (velocity handled by velGain)
+
+        // initialize velGain now so no 1-sample window at default gain=1.0
+        0.35 => velGain.gain;
 
         0.08 => rev.mix;
 
