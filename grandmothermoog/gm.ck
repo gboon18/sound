@@ -7,7 +7,7 @@ public class GrandMotherVoice extends Chugraph
     // --------- patch points ---------
     // external audio can be patched into inlet
     inlet => Gain extIn => Gain mix => Gain drive => LPF f1 => LPF f2 => LPF f3 => LPF f4
-          => ADSR ampEnv => Dyno outLim => NRev rev => outlet;
+          => ADSR ampEnv => Gain velGain => Dyno outLim => NRev rev => outlet;
 
     // oscillators + noise into mixer
     TriOsc  vco1_tri => Gain vco1_gain => mix;
@@ -57,10 +57,16 @@ public class GrandMotherVoice extends Chugraph
         0 => extIn.gain;
         0 => noiseGain.gain;
 
-        // drive + limiter + verb
+        // drive
         1.0 => drive.gain;
-        0::ms => outLim.attackTime;
-        0.90 => outLim.thresh;
+
+        // hard brick-wall limiter — must call limit() or Dyno is passthrough
+        outLim.limit();
+        0::ms  => outLim.attackTime;   // instantaneous attack: no transient slips through
+        20::ms => outLim.releaseTime;  // fast recovery
+        0.80   => outLim.thresh;       // -2 dBFS ceiling with some headroom
+        1.0    => outLim.gain;         // neutral output gain (velocity handled by velGain)
+
         0.08 => rev.mix;
 
         // amp envelope (fast by default, tweak via setters)
@@ -308,7 +314,7 @@ public class GrandMotherVoice extends Chugraph
 
             // velocity scaling (simple)
             // keep envelope as the main shaper; just scale overall output level slightly
-            (0.35 + 0.65 * velAmp) => outLim.gain;
+            (0.35 + 0.65 * velAmp) => velGain.gain;
 
             dt => now;
         }
@@ -344,25 +350,75 @@ gm.setNoise(0.02);
 gm.setReverb(10);
 gm.setGlideMs(35);
 
-// simple sequencer
-48 => int root;
-[0, 0, 7, 5, 12, 7, 5, 3] @=> int seq[];
-[110, 90, 110, 90, 120, 95, 105, 80] @=> int vel[];
-
-120.0 => float bpm;
-(60.0 / bpm)::second => dur beat;
-beat / 2 => dur step;
-
-while(true)
+// ---- OSC listener (receives from gm_gui.py on port 9000) ----
+fun void oscLoop()
 {
-    for(0 => int i; i < seq.cap(); i++)
-    {
-        int n;
-        root + seq[i] => n;
+    OscIn oin;
+    OscMsg omsg;
+    9000 => oin.port;
+    oin.addAddress("/gm/cutoff, f");
+    oin.addAddress("/gm/res, f");
+    oin.addAddress("/gm/envamt, f");
+    oin.addAddress("/gm/drive, f");
+    oin.addAddress("/gm/reverb, f");
+    oin.addAddress("/gm/glidems, f");
+    oin.addAddress("/gm/lforate, f");
+    oin.addAddress("/gm/lfopitch, f");
+    oin.addAddress("/gm/lfocutoff, f");
+    oin.addAddress("/gm/vco1wave, i");
+    oin.addAddress("/gm/vco2wave, i");
+    oin.addAddress("/gm/vco1level, f");
+    oin.addAddress("/gm/vco2level, f");
+    oin.addAddress("/gm/detune, f");
+    oin.addAddress("/gm/noise, f");
+    oin.addAddress("/gm/extin, f");
+    oin.addAddress("/gm/ampA, f");
+    oin.addAddress("/gm/ampD, f");
+    oin.addAddress("/gm/ampS, f");
+    oin.addAddress("/gm/ampR, f");
+    oin.addAddress("/gm/filtA, f");
+    oin.addAddress("/gm/filtD, f");
+    oin.addAddress("/gm/filtS, f");
+    oin.addAddress("/gm/filtR, f");
+    oin.addAddress("/gm/seq/noteon, i");
+    oin.addAddress("/gm/seq/noteoff, i");
 
-        gm.noteOn(n, vel[i]);
-        step * 0.85 => now;
-        gm.noteOff(n);
-        step * 0.15 => now;
+    while(true)
+    {
+        oin => now;
+        while(oin.recv(omsg))
+        {
+            if(omsg.address == "/gm/cutoff")   gm.setCutoff(omsg.getFloat(0));
+            if(omsg.address == "/gm/res")       gm.setRes(omsg.getFloat(0));
+            if(omsg.address == "/gm/envamt")    gm.setEnvAmt(omsg.getFloat(0));
+            if(omsg.address == "/gm/drive")     gm.setDrive(omsg.getFloat(0));
+            if(omsg.address == "/gm/reverb")    gm.setReverb(omsg.getFloat(0));
+            if(omsg.address == "/gm/glidems")   gm.setGlideMs(omsg.getFloat(0));
+            if(omsg.address == "/gm/lforate")   gm.setLfoRate(omsg.getFloat(0));
+            if(omsg.address == "/gm/lfopitch")  gm.setLfoPitch(omsg.getFloat(0));
+            if(omsg.address == "/gm/lfocutoff") gm.setLfoCutoff(omsg.getFloat(0));
+            if(omsg.address == "/gm/vco1wave")  gm.setVco1Wave(omsg.getInt(0));
+            if(omsg.address == "/gm/vco2wave")  gm.setVco2Wave(omsg.getInt(0));
+            if(omsg.address == "/gm/vco1level") gm.setVco1Level(omsg.getFloat(0));
+            if(omsg.address == "/gm/vco2level") gm.setVco2Level(omsg.getFloat(0));
+            if(omsg.address == "/gm/detune")    gm.setDetune(omsg.getFloat(0));
+            if(omsg.address == "/gm/noise")     gm.setNoise(omsg.getFloat(0));
+            if(omsg.address == "/gm/extin")     gm.setExtIn(omsg.getFloat(0));
+            if(omsg.address == "/gm/ampA")  { omsg.getFloat(0) => float t; t::ms => gm.ampEnv.attackTime; }
+            if(omsg.address == "/gm/ampD")  { omsg.getFloat(0) => float t; t::ms => gm.ampEnv.decayTime; }
+            if(omsg.address == "/gm/ampS")  { omsg.getFloat(0) => gm.ampEnv.sustainLevel; }
+            if(omsg.address == "/gm/ampR")  { omsg.getFloat(0) => float t; t::ms => gm.ampEnv.releaseTime; }
+            if(omsg.address == "/gm/filtA") { omsg.getFloat(0) => float t; t::ms => gm.filtEnv.attackTime; }
+            if(omsg.address == "/gm/filtD") { omsg.getFloat(0) => float t; t::ms => gm.filtEnv.decayTime; }
+            if(omsg.address == "/gm/filtS") { omsg.getFloat(0) => gm.filtEnv.sustainLevel; }
+            if(omsg.address == "/gm/filtR") { omsg.getFloat(0) => float t; t::ms => gm.filtEnv.releaseTime; }
+            // sequencer: GUI sends absolute MIDI note; adjust for baseOffset (48)
+            if(omsg.address == "/gm/seq/noteon")  gm.noteOn(omsg.getInt(0) - gm.baseOffset, 100);
+            if(omsg.address == "/gm/seq/noteoff") gm.noteOff(gm.lastNote);
+        }
     }
 }
+spork ~ oscLoop();
+
+// keep main shred alive; sequencer is driven from gm_gui.py via OSC
+while(true) { 1::second => now; }
