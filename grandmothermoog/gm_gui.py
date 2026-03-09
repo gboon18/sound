@@ -23,6 +23,7 @@ import time
 
 import numpy as np
 from PIL import Image, ImageTk
+from scipy.signal import butter, lfilter
 
 try:
     import sounddevice as sd
@@ -648,70 +649,172 @@ class StepSequencer(tk.Frame):
 
 # ─── Spectrogram widget ───────────────────────────────────────────────────────
 
+def _gen_wave(wtype, t):
+    """Compute one normalized waveform. t is phase in cycles (0 … N_cycles)."""
+    ph = t % 1.0
+    if wtype == 1:   # TRI
+        return (4.0 * np.abs(ph - 0.5) - 1.0).astype(np.float32)
+    elif wtype == 2: # SAW
+        return (2.0 * ph - 1.0).astype(np.float32)
+    elif wtype == 3: # SQR
+        return np.where(ph < 0.5, 1.0, -1.0).astype(np.float32)
+    return np.zeros_like(t, dtype=np.float32)  # OFF
+
+
 class Oscilloscope(tk.Frame):
-    """Real-time time-domain waveform (amplitude vs time)."""
+    """Math-based waveform display — renders the VCO shapes directly.
 
-    SAMPLE_RATE = 44100
-    CHUNK       = 1024
-    UPDATE_MS   = 33     # ~30 fps
+    state_source: callable → {'vco1': int, 'vco2': int, 'l1': float, 'l2': float}
+    wave types: 0=OFF  1=TRI  2=SAW  3=SQR
+    """
 
-    def __init__(self, parent, **kwargs):
-        super().__init__(parent, bg="#0a0a18", **kwargs)
+    UPDATE_MS  = 50   # 20 fps is plenty for a static shape
+    N_CYCLES   = 3    # how many cycles to show
 
-        CW, CH    = 620, 80
-        self._CW  = CW
-        self._CH  = CH
+    def __init__(self, parent, state_source=None, **kwargs):
+        super().__init__(parent, bg="#050510", **kwargs)
+        self._state_source = state_source
+
+        CW, CH   = 620, 110
+        self._CW = CW
+        self._CH = CH
 
         self._cv = tk.Canvas(self, width=CW, height=CH,
-                             bg="#0a0a18", highlightthickness=0)
+                             bg="#050510", highlightthickness=0)
         self._cv.pack(padx=4, pady=(2, 4))
 
-        # pre-draw grid
-        mid = CH // 2
-        self._cv.create_line(0, mid, CW, mid, fill="#1a1a28", width=1)
-        for y in (mid // 2, mid + mid // 2):
-            self._cv.create_line(0, y, CW, y, fill="#111120", width=1)
-
-        self._buf = np.zeros(CW, dtype=np.float32)
-        self._q   = _audio.subscribe()
-        self._line_id = None
+        # static grid
+        for frac in (0.25, 0.5, 0.75):
+            y = int(frac * CH)
+            self._cv.create_line(0, y, CW, y,
+                                 fill="#1c1c30" if frac == 0.5 else "#111120")
+        for frac in (0.25, 0.5, 0.75):
+            self._cv.create_line(int(frac * CW), 0, int(frac * CW), CH,
+                                 fill="#111120")
 
         self._tick()
 
     def _tick(self):
-        chunk = None
-        while True:
-            try:
-                chunk = self._q.get_nowait()
-            except queue.Empty:
-                break
-
-        if chunk is not None:
-            # keep a rolling window the width of the canvas
-            n = min(len(chunk), self._CW)
-            self._buf = np.roll(self._buf, -n)
-            self._buf[-n:] = chunk[:n]
-            self._render()
-
+        self._render()
         self.after(self.UPDATE_MS, self._tick)
 
     def _render(self):
+        if self._state_source is None:
+            return
+        st  = self._state_source()
         CW, CH = self._CW, self._CH
-        mid    = CH / 2
-        amp    = (CH / 2) * 0.9   # 90 % of half-height
+        mid = CH / 2
+        amp = (CH / 2) * 0.85
 
-        ys = mid - np.clip(self._buf, -1.0, 1.0) * amp
-        xs = np.arange(CW, dtype=np.float32)
+        # generate at actual sample rate so filter math is correct
+        SR       = 44100
+        NOTE_HZ  = 220.0          # reference pitch (A3) — shape is frequency-independent
+        n_samp   = int(SR / NOTE_HZ * (self.N_CYCLES + 1))  # +1 cycle for filter settling
+        t        = np.linspace(0, self.N_CYCLES + 1, n_samp, dtype=np.float32)
+
+        wave = (_gen_wave(st['vco1'], t) * st['l1'] +
+                _gen_wave(st['vco2'], t) * st['l2'])
+
+        # noise
+        if st['noise'] > 1e-4:
+            wave += np.random.randn(n_samp).astype(np.float32) * st['noise']
+
+        # drive (soft-clip matching ChucK's Gain overdrive style)
+        drive_gain = 1.0 + st['drive'] / 25.0
+        wave = np.tanh(wave * drive_gain).astype(np.float32)
+
+        # 4-pole LPF (matches ChucK: cutoff = 40*200^(v/100), Q = 0.4+3.6*(v/100))
+        cutoff_hz = 40.0 * (200.0 ** (st['cutoff'] / 100.0))
+        fc = float(np.clip(cutoff_hz / (SR / 2.0), 0.01, 0.99))
+        b, a = butter(4, fc, btype='low')
+        wave = lfilter(b, a, wave).astype(np.float32)
+
+        # skip the first cycle (filter transient)
+        skip = int(SR / NOTE_HZ)
+        wave = wave[skip:]
+
+        peak = float(np.max(np.abs(wave)))
+        if peak < 1e-7:
+            self._cv.delete("wave")
+            return
+        wave = wave / peak
+
+        xs    = np.linspace(0, CW - 1, CW, dtype=np.float32)
+        seg_x = np.linspace(0, CW - 1, len(wave), dtype=np.float32)
+        ys_px = mid - np.interp(xs, seg_x, wave) * amp
 
         coords = np.empty(CW * 2, dtype=np.float32)
         coords[0::2] = xs
-        coords[1::2] = ys
+        coords[1::2] = ys_px
 
-        if self._line_id is not None:
-            self._cv.delete(self._line_id)
-        self._line_id = self._cv.create_line(
-            coords.tolist(), fill="#00ff88", width=1, smooth=False
+        self._cv.delete("wave")
+        self._cv.create_line(
+            coords.tolist(), fill="#00e5ff", width=2,
+            smooth=False, tags="wave"
         )
+
+
+class ADSRDisplay(tk.Canvas):
+    """Draws AMP ENV and FILT ENV ADSR curves from the synth state."""
+
+    UPDATE_MS   = 80
+    SUSTAIN_MS  = 180   # fixed sustain segment width for display
+
+    def __init__(self, parent, state_source=None, width=620, height=70, **kwargs):
+        super().__init__(parent, width=width, height=height,
+                         bg="#050510", highlightthickness=0, **kwargs)
+        self._W  = width
+        self._H  = height
+        self._state_source = state_source
+        self._tick()
+
+    def _tick(self):
+        self._render()
+        self.after(self.UPDATE_MS, self._tick)
+
+    def _render(self):
+        if self._state_source is None:
+            return
+        st = self._state_source()
+        self.delete("env")
+
+        W, H = self._W, self._H
+        pad  = 4
+        h    = H - pad * 2
+
+        for prefix, color in (('amp', '#ff6600'), ('filt', '#00aacc')):
+            A = st[prefix + 'A']
+            D = st[prefix + 'D']
+            S = st[prefix + 'S']
+            R = st[prefix + 'R']
+
+            total = A + D + self.SUSTAIN_MS + R
+            if total < 1:
+                continue
+
+            def tx(ms):
+                return pad + (ms / total) * (W - pad * 2)
+
+            def ty(amp):
+                return pad + (1.0 - amp) * h
+
+            pts = [
+                tx(0),               ty(0),
+                tx(A),               ty(1),
+                tx(A + D),           ty(S),
+                tx(A + D + self.SUSTAIN_MS), ty(S),
+                tx(total),           ty(0),
+            ]
+            self.create_line(pts, fill=color, width=2, smooth=False, tags="env")
+
+        # legend
+        self.create_text(pad + 2, pad,     text="AMP ENV", fill="#ff6600",
+                         font=("Courier", 6), anchor="nw", tags="env")
+        self.create_text(pad + 60, pad,    text="FILT ENV", fill="#00aacc",
+                         font=("Courier", 6), anchor="nw", tags="env")
+        # zero line
+        self.create_line(pad, H - pad, W - pad, H - pad,
+                         fill="#1c1c30", width=1, tags="env")
 
 
 class Spectrogram(tk.Canvas):
@@ -816,7 +919,7 @@ def section(parent, title):
                          bd=1, relief="groove", labelanchor="n")
 
 
-def wave_sel(parent, osc_addr, default="SAW"):
+def wave_sel(parent, osc_addr, default="SAW", on_change=None):
     """Small wave-type dropdown; returns the frame."""
     options = ["OFF", "TRI", "SAW", "SQR"]
     vals    = {"OFF": 0, "TRI": 1, "SAW": 2, "SQR": 3}
@@ -827,19 +930,30 @@ def wave_sel(parent, osc_addr, default="SAW"):
     cb.pack(padx=4, pady=(8, 0))
     tk.Label(f, text="WAVE", fg="#ccccee", bg="#1a1a2e",
              font=("Courier", 8, "bold")).pack(pady=(2, 6))
-    var.trace_add("write", lambda *_: send_int(osc_addr, vals[var.get()]))
+    def _cb(*_):
+        v = vals[var.get()]
+        send_int(osc_addr, v)
+        if on_change:
+            on_change(v)
+    var.trace_add("write", _cb)
     return f
 
 
 def knob_row(parent, specs):
     """
-    specs = [(label, min, max, default, osc_addr, fmt), ...]
+    specs = [(label, min, max, default, osc_addr, fmt[, on_change]), ...]
     Grids knobs in row=0, column=0,1,2...
+    Optional 7th element is a callback called with the new value.
     """
-    for col, (lbl, mn, mx, dflt, addr, fmt) in enumerate(specs):
+    for col, spec in enumerate(specs):
+        lbl, mn, mx, dflt, addr, fmt = spec[:6]
+        cb = spec[6] if len(spec) > 6 else None
+        def _cmd(v, a=addr, c=cb):
+            send(a, v)
+            if c:
+                c(v)
         Knob(parent, lbl, mn, mx, dflt,
-             command=lambda v, a=addr: send(a, v),
-             fmt=fmt).grid(row=0, column=col, padx=4, pady=4)
+             command=_cmd, fmt=fmt).grid(row=0, column=col, padx=4, pady=4)
 
 
 # ─── Build GUI ────────────────────────────────────────────────────────────────
@@ -906,20 +1020,34 @@ def build():
     r1 = tk.Frame(root, bg="#1a1a2e")
     r1.pack(fill="x", padx=6, pady=3)
 
+    # shared synth state — drives the oscilloscope + ADSR display
+    _vco = {
+        'vco1': 2,   'vco2': 3,    'l1': 0.3,  'l2': 0.3,
+        'noise': 0.02,
+        'cutoff': 35.0, 'reso': 40.0,
+        'drive': 35.0,
+        'ampA': 5.0,  'ampD': 120.0, 'ampS': 0.65, 'ampR': 120.0,
+        'filtA': 3.0, 'filtD': 140.0, 'filtS': 0.0, 'filtR': 180.0,
+    }
+
     # VCO 1
     v1 = section(r1, "VCO 1")
     v1.pack(side="left", padx=3, fill="y")
-    wave_sel(v1, "/gm/vco1wave", "SAW").grid(row=0, column=0, padx=4)
+    wave_sel(v1, "/gm/vco1wave", "SAW",
+             on_change=lambda v: _vco.update({'vco1': v})
+             ).grid(row=0, column=0, padx=4)
     Knob(v1, "LEVEL", 0, 1, 0.3,
-         command=lambda v: send("/gm/vco1level", v),
+         command=lambda v: (send("/gm/vco1level", v), _vco.update({'l1': v})),
          fmt=".2f").grid(row=0, column=1, padx=4, pady=4)
 
     # VCO 2
     v2 = section(r1, "VCO 2")
     v2.pack(side="left", padx=3, fill="y")
-    wave_sel(v2, "/gm/vco2wave", "SQR").grid(row=0, column=0, padx=4)
+    wave_sel(v2, "/gm/vco2wave", "SQR",
+             on_change=lambda v: _vco.update({'vco2': v})
+             ).grid(row=0, column=0, padx=4)
     Knob(v2, "LEVEL", 0, 1, 0.3,
-         command=lambda v: send("/gm/vco2level", v),
+         command=lambda v: (send("/gm/vco2level", v), _vco.update({'l2': v})),
          fmt=".2f").grid(row=0, column=1, padx=4, pady=4)
     Knob(v2, "DETUNE c", -50, 50, 7.0,
          command=lambda v: send("/gm/detune", v),
@@ -929,7 +1057,7 @@ def build():
     mx = section(r1, "MIXER")
     mx.pack(side="left", padx=3, fill="y")
     knob_row(mx, [
-        ("NOISE",  0, 1, 0.02, "/gm/noise",  ".3f"),
+        ("NOISE",  0, 1, 0.02, "/gm/noise",  ".3f", lambda v: _vco.update({'noise': v})),
         ("EXT IN", 0, 1, 0.0,  "/gm/extin",  ".2f"),
     ])
 
@@ -947,8 +1075,8 @@ def build():
     ft = section(r2, "FILTER")
     ft.pack(side="left", padx=3, fill="y")
     knob_row(ft, [
-        ("CUTOFF", 0, 100, 35, "/gm/cutoff",  ".0f"),
-        ("RES",    0, 100, 40, "/gm/res",     ".0f"),
+        ("CUTOFF", 0, 100, 35, "/gm/cutoff",  ".0f", lambda v: _vco.update({'cutoff': v})),
+        ("RES",    0, 100, 40, "/gm/res",     ".0f", lambda v: _vco.update({'reso': v})),
         ("ENV AMT",0, 100, 55, "/gm/envamt",  ".0f"),
     ])
 
@@ -967,25 +1095,25 @@ def build():
     ae = section(r3, "AMP ENV")
     ae.pack(side="left", padx=3, fill="y")
     knob_row(ae, [
-        ("A ms", 1, 2000, 5,    "/gm/ampA", ".0f"),
-        ("D ms", 1, 2000, 120,  "/gm/ampD", ".0f"),
-        ("S",    0, 1,    0.65, "/gm/ampS", ".2f"),
-        ("R ms", 1, 2000, 120,  "/gm/ampR", ".0f"),
+        ("A ms", 1, 2000, 5,    "/gm/ampA", ".0f", lambda v: _vco.update({'ampA': v})),
+        ("D ms", 1, 2000, 120,  "/gm/ampD", ".0f", lambda v: _vco.update({'ampD': v})),
+        ("S",    0, 1,    0.65, "/gm/ampS", ".2f", lambda v: _vco.update({'ampS': v})),
+        ("R ms", 1, 2000, 120,  "/gm/ampR", ".0f", lambda v: _vco.update({'ampR': v})),
     ])
 
     fe = section(r3, "FILT ENV")
     fe.pack(side="left", padx=3, fill="y")
     knob_row(fe, [
-        ("A ms", 1, 2000, 3,   "/gm/filtA", ".0f"),
-        ("D ms", 1, 2000, 140, "/gm/filtD", ".0f"),
-        ("S",    0, 1,    0.0, "/gm/filtS", ".2f"),
-        ("R ms", 1, 2000, 180, "/gm/filtR", ".0f"),
+        ("A ms", 1, 2000, 3,   "/gm/filtA", ".0f", lambda v: _vco.update({'filtA': v})),
+        ("D ms", 1, 2000, 140, "/gm/filtD", ".0f", lambda v: _vco.update({'filtD': v})),
+        ("S",    0, 1,    0.0, "/gm/filtS", ".2f", lambda v: _vco.update({'filtS': v})),
+        ("R ms", 1, 2000, 180, "/gm/filtR", ".0f", lambda v: _vco.update({'filtR': v})),
     ])
 
     fx = section(r3, "FX")
     fx.pack(side="left", padx=3, fill="y")
     knob_row(fx, [
-        ("DRIVE",  0, 100, 35, "/gm/drive",  ".0f"),
+        ("DRIVE",  0, 100, 35, "/gm/drive",  ".0f", lambda v: _vco.update({'drive': v})),
         ("REVERB", 0, 100, 10, "/gm/reverb", ".0f"),
     ])
 
@@ -1040,10 +1168,11 @@ def build():
     ls.pack(fill="x", padx=6, pady=3)
     LiveSpectrum(ls, step_source=lambda: _seq._cur_step).pack(padx=4, pady=2)
 
-    # ── Row 7 : Oscilloscope ────────────────────────────────────────────────
-    ow = section(root, "WAVEFORM  ( time → amplitude )")
+    # ── Row 7 : Oscilloscope + ADSR ─────────────────────────────────────────
+    ow = section(root, "WAVEFORM  ( VCO mix → filter → drive )")
     ow.pack(fill="x", padx=6, pady=3)
-    Oscilloscope(ow).pack(padx=4, pady=2)
+    Oscilloscope(ow, state_source=lambda: _vco).pack(padx=4, pady=(2, 0))
+    ADSRDisplay(ow, state_source=lambda: _vco).pack(padx=4, pady=(0, 4))
 
     # ── Row 8 : Spectrogram ─────────────────────────────────────────────────
     sp = section(root, "SPECTROGRAM  ( time →  |  30 Hz – 10 kHz log )")
