@@ -100,9 +100,11 @@ try:
 except ImportError:
     raise SystemExit("Install python-osc first:  pip install python-osc")
 
-OSC_IP   = "127.0.0.1"
-OSC_PORT = 9000
-_client  = udp_client.SimpleUDPClient(OSC_IP, OSC_PORT)
+OSC_IP    = "127.0.0.1"
+OSC_PORT  = 9000
+DRUM_PORT = 9001
+_client       = udp_client.SimpleUDPClient(OSC_IP, OSC_PORT)
+_drum_client  = udp_client.SimpleUDPClient(OSC_IP, DRUM_PORT)
 
 
 def send(addr, val):
@@ -115,6 +117,19 @@ def send_int(addr, val):
 
 def send_str(addr, val):
     _client.send_message(addr, str(val))
+
+
+def send_drum(addr, val):
+    _drum_client.send_message(addr, float(val))
+
+
+def send_drum_int(addr, val):
+    _drum_client.send_message(addr, int(val))
+
+
+def send_drum_pair(addr, a, b):
+    """Send two ints as a single OSC message (used for step pattern updates)."""
+    _drum_client.send_message(addr, [int(a), int(b)])
 
 
 # ─── Knob widget ──────────────────────────────────────────────────────────────
@@ -910,6 +925,186 @@ class Spectrogram(tk.Canvas):
                                  fill="#8899aa", font=("Courier", 6))
 
 
+# ─── Drum Sequencer widget ────────────────────────────────────────────────────
+
+class DrumSequencer(tk.Frame):
+    """16-step drum pattern grid. Sends step toggles + transport to drum.ck port 9001."""
+
+    STEPS = 16
+    # (display label, OSC voice name, active colour)
+    VOICES = [
+        ("KICK",  "kick",  "#ff4400"),
+        ("SNARE", "snare", "#ffaa00"),
+        ("C.HAT", "chat",  "#00aaff"),
+        ("O.HAT", "ohat",  "#00dd99"),
+    ]
+
+    _DEFAULTS = {
+        "kick":  [1,0,0,0, 1,0,0,0, 1,0,0,0, 1,0,0,0],
+        "snare": [0,0,0,0, 1,0,0,0, 0,0,0,0, 1,0,0,0],
+        "chat":  [1,0,1,0, 1,0,1,0, 1,0,1,0, 1,0,1,0],
+        "ohat":  [0,0,0,0, 0,0,0,0, 0,0,0,0, 0,0,0,0],
+    }
+
+    def __init__(self, parent, **kwargs):
+        super().__init__(parent, bg="#1a1a2e", **kwargs)
+        self._running   = False
+        self._thread    = None
+        self._cur_step  = -1
+        self._bpm_var   = tk.StringVar(value="120")
+
+        self._pats = {v: list(self._DEFAULTS[v]) for _, v, _ in self.VOICES}
+        self._btns = {v: [] for _, v, _ in self.VOICES}
+
+        self._build_ui()
+        self._push_all_steps()   # initialise drum.ck with default pattern
+
+    def _build_ui(self):
+        # ── transport bar ────────────────────────────────────────────────────
+        ctrl = tk.Frame(self, bg="#1a1a2e")
+        ctrl.pack(fill="x", padx=4, pady=(4, 2))
+
+        tk.Label(ctrl, text="BPM", fg="#ccccee", bg="#1a1a2e",
+                 font=("Courier", 8, "bold")).pack(side="left", padx=(0, 3))
+        tk.Entry(ctrl, textvariable=self._bpm_var, width=5,
+                 bg="#2d2d44", fg="#ddddff", insertbackground="#ff6600",
+                 font=("Courier", 9), relief="flat", justify="center",
+                 ).pack(side="left")
+        self._bpm_var.trace_add("write", self._on_bpm)
+
+        self._play_btn = tk.Button(
+            ctrl, text="▶  PLAY", command=self._toggle,
+            bg="#0d2a0d", fg="#44cc44", activebackground="#1a3a1a",
+            font=("Courier", 8, "bold"), relief="flat", padx=8, pady=2)
+        self._play_btn.pack(side="left", padx=(10, 0))
+
+        tk.Button(ctrl, text="CLEAR ALL", command=self._clear_all,
+                  bg="#1a1a1a", fg="#556677", activebackground="#2a2a2a",
+                  font=("Courier", 7), relief="flat", padx=4, pady=2,
+                  ).pack(side="left", padx=(8, 0))
+
+        tk.Label(ctrl,
+                 text="   click step to toggle  |  rows: kick / snare / closed-hat / open-hat",
+                 fg="#334455", bg="#1a1a2e", font=("Courier", 6),
+                 ).pack(side="left", padx=8)
+
+        # ── step grid ────────────────────────────────────────────────────────
+        grid = tk.Frame(self, bg="#1a1a2e")
+        grid.pack(padx=4, pady=(0, 4))
+
+        # column headers (beat markers)
+        tk.Label(grid, text="", bg="#1a1a2e", width=6).grid(row=0, column=0)
+        for i in range(self.STEPS):
+            clr = "#6688aa" if i % 4 == 0 else "#334455"
+            tk.Label(grid, text=str(i + 1), fg=clr, bg="#1a1a2e",
+                     font=("Courier", 6), width=3).grid(row=0, column=i + 1, padx=1)
+
+        for r, (label, voice, color) in enumerate(self.VOICES):
+            tk.Label(grid, text=label, fg=color, bg="#1a1a2e",
+                     font=("Courier", 8, "bold"), width=6, anchor="e",
+                     ).grid(row=r + 1, column=0, padx=(0, 4))
+            row_btns = []
+            for s in range(self.STEPS):
+                active = self._pats[voice][s]
+                btn = tk.Label(
+                    grid, width=3, height=1,
+                    bg=color if active else "#2d2d44",
+                    cursor="hand2", relief="flat",
+                )
+                btn.grid(row=r + 1, column=s + 1, padx=1, pady=2)
+                btn.bind("<Button-1>",
+                         lambda e, v=voice, i=s: self._toggle_step(v, i))
+                row_btns.append(btn)
+            self._btns[voice] = row_btns
+
+    # ── step toggle ───────────────────────────────────────────────────────────
+
+    def _toggle_step(self, voice, step):
+        new_val = 1 - self._pats[voice][step]
+        self._pats[voice][step] = new_val
+        color = next(c for _, v, c in self.VOICES if v == voice)
+        self._btns[voice][step].config(bg=color if new_val else "#2d2d44")
+        send_drum_pair(f"/drum/step/{voice}", step, new_val)
+
+    def _push_all_steps(self):
+        for _, voice, _ in self.VOICES:
+            for s, val in enumerate(self._pats[voice]):
+                send_drum_pair(f"/drum/step/{voice}", s, val)
+
+    # ── transport ─────────────────────────────────────────────────────────────
+
+    def _on_bpm(self, *_):
+        try:
+            send_drum("/drum/bpm", float(self._bpm_var.get()))
+        except ValueError:
+            pass
+
+    def _toggle(self):
+        if self._running:
+            self._stop()
+        else:
+            self._start()
+
+    def _start(self):
+        self._running = True
+        self._play_btn.config(text="■  STOP", bg="#2a0d0d", fg="#ff4444",
+                              activebackground="#3a1a1a")
+        try:
+            send_drum("/drum/bpm", float(self._bpm_var.get()))
+        except ValueError:
+            pass
+        send_drum_int("/drum/play", 1)
+        self._thread = threading.Thread(target=self._vis_loop, daemon=True)
+        self._thread.start()
+
+    def _stop(self):
+        self._running = False
+        self._play_btn.config(text="▶  PLAY", bg="#0d2a0d", fg="#44cc44",
+                              activebackground="#1a3a1a")
+        send_drum_int("/drum/play", 0)
+        self.after(0, self._highlight, -1)
+
+    # ── visual step indicator (Python-side timing — cosmetic only) ────────────
+
+    def _vis_loop(self):
+        while self._running:
+            try:
+                bpm = max(10.0, float(self._bpm_var.get()))
+            except ValueError:
+                bpm = 120.0
+            step_dur = 60.0 / bpm / 4.0
+
+            for i in range(self.STEPS):
+                if not self._running:
+                    break
+                t0 = time.perf_counter()
+                self._cur_step = i
+                self.after(0, self._highlight, i)
+                elapsed = time.perf_counter() - t0
+                remaining = step_dur - elapsed
+                if remaining > 0:
+                    time.sleep(remaining)
+
+        self.after(0, self._highlight, -1)
+
+    def _highlight(self, step):
+        self._cur_step = step
+        for _, voice, color in self.VOICES:
+            for s, btn in enumerate(self._btns[voice]):
+                active = self._pats[voice][s]
+                if s == step:
+                    btn.config(bg="#ffffff" if active else "#555566")
+                else:
+                    btn.config(bg=color if active else "#2d2d44")
+
+    def _clear_all(self):
+        for _, voice, _ in self.VOICES:
+            for s in range(self.STEPS):
+                self._pats[voice][s] = 0
+                send_drum_pair(f"/drum/step/{voice}", s, 0)
+        self._highlight(-1)
+
+
 # ─── Helpers ──────────────────────────────────────────────────────────────────
 
 def section(parent, title):
@@ -950,6 +1145,19 @@ def knob_row(parent, specs):
         cb = spec[6] if len(spec) > 6 else None
         def _cmd(v, a=addr, c=cb):
             send(a, v)
+            if c:
+                c(v)
+        Knob(parent, lbl, mn, mx, dflt,
+             command=_cmd, fmt=fmt).grid(row=0, column=col, padx=4, pady=4)
+
+
+def drum_knob_row(parent, specs):
+    """Same as knob_row but sends to the drum OSC client (port 9001)."""
+    for col, spec in enumerate(specs):
+        lbl, mn, mx, dflt, addr, fmt = spec[:6]
+        cb = spec[6] if len(spec) > 6 else None
+        def _cmd(v, a=addr, c=cb):
+            send_drum(a, v)
             if c:
                 c(v)
         Knob(parent, lbl, mn, mx, dflt,
@@ -1163,26 +1371,74 @@ def build():
     _seq = StepSequencer(sq)
     _seq.pack(fill="x", padx=4, pady=2)
 
-    # ── Row 6 : Live Spectrum ────────────────────────────────────────────────
+    # ── Row 6 : Drum Machine ─────────────────────────────────────────────────
+    dm = section(root, "DRUM MACHINE  ( chuck drum.ck  →  port 9001 )")
+    dm.pack(fill="x", padx=6, pady=3)
+
+    _drum_seq = DrumSequencer(dm)
+    _drum_seq.pack(fill="x", padx=4, pady=2)
+
+    # ── Row 7 : Drum parameters ──────────────────────────────────────────────
+    dp = tk.Frame(root, bg="#1a1a2e")
+    dp.pack(fill="x", padx=6, pady=(0, 3))
+
+    kick_f = section(dp, "KICK")
+    kick_f.pack(side="left", padx=3, fill="y")
+    drum_knob_row(kick_f, [
+        ("DECAY ms", 20, 800, 320, "/drum/kick/decay",      ".0f"),
+        ("TUNE Hz",  30, 200, 150, "/drum/kick/tune",       ".0f"),
+        ("P.DEC ms", 10, 200,  55, "/drum/kick/pitchdecay", ".0f"),
+        ("DRIVE",     0, 100,  50, "/drum/kick/drive",      ".0f"),
+        ("LFO Hz",  0.05, 20, 0.3, "/drum/kick/lfo/rate",  ".2f"),
+        ("LFO AMT",   0, 80,   0, "/drum/kick/lfo/amt",    ".0f"),
+    ])
+
+    snare_f = section(dp, "SNARE")
+    snare_f.pack(side="left", padx=3, fill="y")
+    drum_knob_row(snare_f, [
+        ("DECAY ms", 20, 500,  90, "/drum/snare/decay",    ".0f"),
+        ("TUNE Hz",  80, 500, 200, "/drum/snare/tune",     ".0f"),
+        ("SNAP",      0, 100,  70, "/drum/snare/snap",     ".0f"),
+        ("LFO Hz",  0.05, 20, 0.3, "/drum/snare/lfo/rate", ".2f"),
+        ("LFO AMT",   0, 120,   0, "/drum/snare/lfo/amt",  ".0f"),
+    ])
+
+    hat_f = section(dp, "HI-HAT")
+    hat_f.pack(side="left", padx=3, fill="y")
+    drum_knob_row(hat_f, [
+        ("C.DEC ms", 10, 200,   35, "/drum/hat/decay/c",    ".0f"),
+        ("O.DEC ms", 50, 800,  260, "/drum/hat/decay/o",    ".0f"),
+        ("LFO Hz",  0.05, 20,  0.3, "/drum/hat/lfo/rate",   ".2f"),
+        ("LFO AMT",   0, 4000,   0, "/drum/hat/lfo/amt",    ".0f"),
+    ])
+
+    dvol_f = section(dp, "DRUM VOL")
+    dvol_f.pack(side="left", padx=3, fill="y")
+    Knob(dvol_f, "MASTER", 0, 1, 0.75,
+         command=lambda v: send_drum("/drum/vol", v),
+         fmt=".2f").grid(row=0, column=0, padx=4, pady=4)
+
+    # ── Row 8 : Live Spectrum ────────────────────────────────────────────────
     ls = section(root, "LIVE SPECTRUM  ( freq → dB )")
     ls.pack(fill="x", padx=6, pady=3)
     LiveSpectrum(ls, step_source=lambda: _seq._cur_step).pack(padx=4, pady=2)
 
-    # ── Row 7 : Oscilloscope + ADSR ─────────────────────────────────────────
+    # ── Row 9 : Oscilloscope + ADSR ─────────────────────────────────────────
     ow = section(root, "WAVEFORM  ( VCO mix → filter → drive )")
     ow.pack(fill="x", padx=6, pady=3)
     Oscilloscope(ow, state_source=lambda: _vco).pack(padx=4, pady=(2, 0))
     ADSRDisplay(ow, state_source=lambda: _vco).pack(padx=4, pady=(0, 4))
 
-    # ── Row 8 : Spectrogram ─────────────────────────────────────────────────
+    # ── Row 10 : Spectrogram ─────────────────────────────────────────────────
     sp = section(root, "SPECTROGRAM  ( time →  |  30 Hz – 10 kHz log )")
     sp.pack(fill="x", padx=6, pady=3)
     Spectrogram(sp).pack(padx=4, pady=4)
 
     # ── Status bar (fixed, outside scroll — attach to real root via _body.master) ──
     tk.Label(root.master,
-             text=f"OSC -> {OSC_IP}:{OSC_PORT}   |   drag up/down   |   double-click resets",
-             bg="#0d0d1a", fg="#555577", font=("Courier", 7), pady=3
+             text=f"synth OSC → {OSC_IP}:{OSC_PORT}   |   drums OSC → {OSC_IP}:{DRUM_PORT}"
+                  "   |   drag up/down   |   double-click resets",
+             bg="#0d0d1a", fg="#555577", font=("Courier", 7), pady=3,
              ).pack(fill="x", side="bottom")
 
     root.master.mainloop()

@@ -1,0 +1,36 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "audio-rect-synth"
+version = "0.1.0"
+description = "Interactive spectrogram rectangle fitting and reconstruction tool."
+readme = "README.md"
+requires-python = ">=3.10,<3.15"
+license = "MIT"
+authors = [
+  { name = "OpenAI ChatGPT" }
+]
+dependencies = [
+  "numpy (>=1.24)",
+  "scipy (>=1.10)",
+  "soundfile (>=0.12)",
+  "av (>=11.0)",
+  "pyside6 (>=6.6)",
+  "pyqtgraph (>=0.13)",
+  "sounddevice (>=0.4)"
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=7.0"
+]
+
+[project.scripts]
+audio-rect-synth = "audio_rect_synth.app.main:main"
+rect-synth-cli = "audio_rect_synth.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["audio_rect_synth*"]

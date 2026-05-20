@@ -1,0 +1,465 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>GrandMotherMoog + Drum Machine — Reference</title>
+<style>
+  :root {
+    --bg:      #0d0d1a;
+    --panel:   #1a1a2e;
+    --border:  #2d2d55;
+    --accent:  #ff6600;
+    --cyan:    #00e5ff;
+    --green:   #44cc44;
+    --yellow:  #ffaa00;
+    --red:     #ff4400;
+    --teal:    #00dd99;
+    --text:    #ccccee;
+    --muted:   #667788;
+    --code-bg: #111128;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: "Courier New", Courier, monospace;
+    font-size: 13px;
+    line-height: 1.7;
+    padding: 32px 24px;
+  }
+  h1 { color: var(--accent); font-size: 22px; letter-spacing: 2px; margin-bottom: 4px; }
+  h2 { color: var(--cyan);   font-size: 15px; letter-spacing: 1px; margin: 36px 0 12px; border-bottom: 1px solid var(--border); padding-bottom: 6px; }
+  h3 { color: var(--yellow); font-size: 13px; margin: 20px 0 8px; }
+  p  { margin-bottom: 10px; }
+  a  { color: var(--cyan); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+
+  .subtitle { color: var(--muted); margin-bottom: 28px; font-size: 11px; letter-spacing: 1px; }
+
+  /* nav */
+  nav { background: var(--panel); border: 1px solid var(--border); padding: 14px 20px; margin-bottom: 32px; display: inline-block; }
+  nav ul { list-style: none; }
+  nav li { margin: 3px 0; }
+  nav li::before { content: "→ "; color: var(--accent); }
+
+  /* code blocks */
+  pre {
+    background: var(--code-bg);
+    border-left: 3px solid var(--accent);
+    padding: 12px 16px;
+    margin: 12px 0;
+    overflow-x: auto;
+    font-size: 12px;
+    color: #aaddff;
+  }
+  code { color: #aaddff; background: var(--code-bg); padding: 1px 5px; }
+
+  /* tables */
+  table { width: 100%; border-collapse: collapse; margin: 12px 0; }
+  th { background: var(--panel); color: var(--cyan); text-align: left; padding: 7px 10px; border: 1px solid var(--border); font-size: 11px; letter-spacing: 1px; text-transform: uppercase; }
+  td { padding: 6px 10px; border: 1px solid var(--border); vertical-align: top; }
+  tr:nth-child(even) td { background: #111128; }
+  td:first-child { color: var(--accent); white-space: nowrap; }
+  td:nth-child(2) { color: var(--muted); white-space: nowrap; }
+
+  /* callouts */
+  .note    { background: #0d1a2e; border-left: 3px solid var(--cyan);   padding: 10px 14px; margin: 14px 0; }
+  .warning { background: #1a1008; border-left: 3px solid var(--accent);  padding: 10px 14px; margin: 14px 0; }
+  .tip     { background: #0d1a0d; border-left: 3px solid var(--green);  padding: 10px 14px; margin: 14px 0; }
+
+  /* flow diagram */
+  .flow { background: var(--code-bg); padding: 16px; margin: 14px 0; font-size: 11px; line-height: 2; overflow-x: auto; }
+  .flow .arrow { color: var(--muted); }
+  .flow .block { color: var(--accent); }
+  .flow .mod   { color: var(--yellow); }
+  .flow .fx    { color: var(--cyan); }
+  .flow .env   { color: #cc4444; }
+  .flow .out   { color: var(--teal); }
+
+  /* voice badges */
+  .kick  { color: var(--red); }
+  .snare { color: var(--yellow); }
+  .chat  { color: var(--cyan); }
+  .ohat  { color: var(--teal); }
+  .synth { color: var(--accent); }
+
+  section { margin-bottom: 12px; }
+
+  footer { margin-top: 48px; color: var(--muted); font-size: 10px; border-top: 1px solid var(--border); padding-top: 12px; }
+</style>
+</head>
+<body>
+
+<h1>GRANDMOTHER MOOG + DRUM MACHINE</h1>
+<p class="subtitle">ChucK synthesizer reference — gm.ck · drum.ck · gm_gui.py</p>
+
+<nav>
+  <ul>
+    <li><a href="#how-to-run">How to Run</a></li>
+    <li><a href="#drum-params">Drum Parameters Explained</a></li>
+    <li><a href="#drum-flow">Drum Signal Flow</a></li>
+    <li><a href="#synth-params">GrandMotherMoog Parameters</a></li>
+    <li><a href="#synth-flow">Synth Signal Flow</a></li>
+    <li><a href="#lfo">LFO Modulation</a></li>
+    <li><a href="#osc">OSC Address Reference</a></li>
+    <li><a href="#tips">Tips &amp; Recipes</a></li>
+  </ul>
+</nav>
+
+
+<!-- ─────────────────────────────────────────── HOW TO RUN ──── -->
+<h2 id="how-to-run">How to Run</h2>
+
+<h3>Synth only</h3>
+<pre>chuck gm.ck
+python gm_gui.py</pre>
+
+<h3>Drums only</h3>
+<pre>chuck drum.ck
+python gm_gui.py</pre>
+
+<h3>Both together (synth + drums, timed)</h3>
+<pre>chuck gm.ck drum.ck
+python gm_gui.py</pre>
+
+<p>When both files are loaded into the same ChucK VM they share the same audio clock and both route to <code>dac</code>, so they mix automatically in perfect sample-accurate sync. The GUI sends OSC to port <strong>9000</strong> (synth) and port <strong>9001</strong> (drums) independently. Use the <strong>STEP SEQUENCER</strong> BPM and the <strong>DRUM MACHINE</strong> BPM to control each independently, or type the same value in both for locked sync.</p>
+
+<div class="note">The two ChucK files do <em>not</em> share state — you can stop/start either sequencer without affecting the other.</div>
+
+
+<!-- ─────────────────────────────────────────── DRUM PARAMS ──── -->
+<h2 id="drum-params">Drum Parameters Explained</h2>
+
+<h3 class="kick">KICK</h3>
+<table>
+  <tr><th>Knob</th><th>Range</th><th>What it does</th></tr>
+  <tr>
+    <td>DECAY ms</td><td>20 – 800 ms</td>
+    <td>How long the kick's amplitude rings out. Short (60 ms) = tight electronic click. Long (500 ms) = boomy 808 tail.</td>
+  </tr>
+  <tr>
+    <td>TUNE Hz</td><td>30 – 200 Hz</td>
+    <td>The <em>starting</em> frequency of the pitch sweep. Higher = brighter attack transient. Lower = deeper, thudier hit. The pitch then sweeps down to a fixed ~40 Hz endpoint.</td>
+  </tr>
+  <tr>
+    <td>P.DEC ms</td><td>10 – 200 ms</td>
+    <td><strong>Pitch Decay</strong> — how quickly the pitch falls from TUNE Hz to the end frequency. Short = snappy TR-808 style. Long = drawn-out "boing" / tom-like.</td>
+  </tr>
+  <tr>
+    <td>DRIVE</td><td>0 – 100</td>
+    <td>Input gain before the hard limiter. Higher values push the sine wave into saturation/clipping, adding harmonics and grit. At 0 the kick is clean and subby; at 100 it crunches.</td>
+  </tr>
+  <tr>
+    <td>LFO Hz</td><td>0.05 – 20 Hz</td>
+    <td>Speed of the pitch LFO. At slow rates (0.3 Hz) each hit sounds slightly different over time — organic, tape-like. At fast rates (8+ Hz) you get rapid pitch wobble every hit.</td>
+  </tr>
+  <tr>
+    <td>LFO AMT</td><td>0 – 80 Hz</td>
+    <td>How much the LFO shifts the starting pitch away from TUNE Hz on each hit. 0 = no modulation (all hits identical). 20–40 = subtle humanisation. 80 = wild pitch variation.</td>
+  </tr>
+</table>
+
+<h3 class="snare">SNARE</h3>
+<table>
+  <tr><th>Knob</th><th>Range</th><th>What it does</th></tr>
+  <tr>
+    <td>DECAY ms</td><td>20 – 500 ms</td>
+    <td>Amplitude decay of both the tone and noise layers. Short = crisp rimshot. Long = open, washy snare.</td>
+  </tr>
+  <tr>
+    <td>TUNE Hz</td><td>80 – 500 Hz</td>
+    <td>Center frequency of the sine <em>body</em> tone. Low (100 Hz) = fat, thumpy snare. High (400 Hz) = thin, snappy rimshot character.</td>
+  </tr>
+  <tr>
+    <td>SNAP</td><td>0 – 100</td>
+    <td>Balance between the noise layer and the tone layer. 0 = pure sine body (tom-like). 100 = mostly bandpass noise (pure snare buzz). Around 60–75 gives a natural snare blend.</td>
+  </tr>
+  <tr>
+    <td>LFO Hz</td><td>0.05 – 20 Hz</td>
+    <td>LFO rate for tone pitch modulation.</td>
+  </tr>
+  <tr>
+    <td>LFO AMT</td><td>0 – 120 Hz</td>
+    <td>How much the LFO displaces the body tone frequency on each hit. Useful for pitch-bent snare flams or detuned cross-stick sounds.</td>
+  </tr>
+</table>
+
+<h3 class="chat">HI-HAT (closed) &amp; <span class="ohat">HI-HAT (open)</span></h3>
+<table>
+  <tr><th>Knob</th><th>Range</th><th>What it does</th></tr>
+  <tr>
+    <td>C.DEC ms</td><td>10 – 200 ms</td>
+    <td><strong>Closed hi-hat decay.</strong> Short (15–40 ms) = tight, clicking closed hat. Longer = more like a rim tap.</td>
+  </tr>
+  <tr>
+    <td>O.DEC ms</td><td>50 – 800 ms</td>
+    <td><strong>Open hi-hat decay.</strong> Longer values (200–600 ms) create the classic sizzling open hat sustain.</td>
+  </tr>
+  <tr>
+    <td>LFO Hz</td><td>0.05 – 20 Hz</td>
+    <td>LFO rate for HPF cutoff modulation.</td>
+  </tr>
+  <tr>
+    <td>LFO AMT</td><td>0 – 4000 Hz</td>
+    <td>How much the LFO shifts the high-pass filter cutoff on each hit. Even small amounts (200–500 Hz) add shimmer and tonal variety between hits. Large values drastically change the hi-hat character.</td>
+  </tr>
+</table>
+
+<h3>DRUM VOL — MASTER</h3>
+<table>
+  <tr><th>Knob</th><th>Range</th><th>What it does</th></tr>
+  <tr>
+    <td>MASTER</td><td>0.0 – 1.0</td>
+    <td>Overall drum output level fed into the master Dyno limiter. The limiter catches any summing peaks — so you can push this fairly hard without hard clipping at the DAC.</td>
+  </tr>
+</table>
+
+
+<!-- ─────────────────────────────────────────── DRUM FLOW ──── -->
+<h2 id="drum-flow">Drum Signal Flow</h2>
+
+<div class="flow">
+<span class="block">KICK</span>
+  <span class="arrow">  SinOsc</span> <span class="mod">→ [LFO samples pitch start per hit]</span>
+  <span class="arrow">  → ADSR(amp)</span> <span class="arrow">+ Noise → ADSR(click)</span>
+  <span class="arrow">  → Gain(drive) → Dyno(lim 0.85) ──────────────────────────┐</span>
+
+<span class="block">SNARE</span>
+  <span class="arrow">  SinOsc</span> <span class="mod">→ [LFO offsets tone.freq per hit]</span>
+  <span class="arrow">  → ADSR(tone)</span>
+  <span class="arrow">  Noise → BPF(3.5kHz) → ADSR(noise)</span>
+  <span class="arrow">  → Gain(mix) → Dyno(lim 0.85) ───────────────────────────┤</span>
+
+<span class="block">HIHAT</span>
+  <span class="arrow">  Noise</span> <span class="mod">→ [LFO offsets HPF cutoff per hit]</span>
+  <span class="arrow">  → HPF(~7.8kHz) → ADSR(closed or open decay)</span>
+  <span class="arrow">  → Dyno(lim 0.85) ────────────────────────────────────────┤</span>
+                                                            <span class="arrow">  ↓</span>
+                                        <span class="fx">Gain(master) → Dyno(masterLim 0.92) → dac</span>
+</div>
+
+<div class="note">Each voice has its own hard limiter at 0.85. The master limiter at 0.92 catches summing peaks when multiple voices hit simultaneously (worst case: 3 × 0.85 × 0.55 = 1.4 — the master limiter brings this back down cleanly).</div>
+
+
+<!-- ─────────────────────────────────────────── SYNTH PARAMS ──── -->
+<h2 id="synth-params">GrandMotherMoog (gm.ck) Parameters</h2>
+
+<h3 class="synth">VCO 1 / VCO 2</h3>
+<table>
+  <tr><th>Control</th><th>Range</th><th>What it does</th></tr>
+  <tr><td>WAVE</td><td>OFF / TRI / SAW / SQR</td><td>Oscillator waveform. SAW = bright, harmonically rich. SQR = hollow, reedy. TRI = mellow, flute-like.</td></tr>
+  <tr><td>LEVEL</td><td>0.0 – 1.0</td><td>Oscillator output level into the mixer.</td></tr>
+  <tr><td>DETUNE c</td><td>−50 – +50 cents</td><td>VCO2 pitch offset relative to VCO1. Small values (5–15 cents) add chorus/width. Large values (±50) create parallel interval effects.</td></tr>
+</table>
+
+<h3 class="synth">MIXER</h3>
+<table>
+  <tr><th>Control</th><th>Range</th><th>What it does</th></tr>
+  <tr><td>NOISE</td><td>0.0 – 1.0</td><td>White noise level. Low (0.01–0.05) adds analog texture. High (0.5+) creates wind/breath sounds.</td></tr>
+  <tr><td>EXT IN</td><td>0.0 – 1.0</td><td>Level of audio patched into the synth's inlet (Chugraph inlet). Can be used to filter external signals.</td></tr>
+</table>
+
+<h3 class="synth">FILTER (4-pole Moog-style cascade)</h3>
+<table>
+  <tr><th>Control</th><th>Range</th><th>What it does</th></tr>
+  <tr><td>CUTOFF</td><td>0 – 100</td><td>Base low-pass filter cutoff. Maps exponentially: 0 ≈ 40 Hz (nearly closed), 100 ≈ 8000 Hz (wide open). Stack with ENV AMT for the classic synth filter sweep.</td></tr>
+  <tr><td>RES</td><td>0 – 100</td><td>Resonance (Q) per filter stage. 4 stages cascade, so even moderate values produce a strong peak. High values (70+) self-oscillate.</td></tr>
+  <tr><td>ENV AMT</td><td>0 – 100</td><td>How much the filter envelope opens the cutoff. 0 = cutoff stays at base. 100 = filter env adds up to 6000 Hz above the base cutoff.</td></tr>
+</table>
+
+<h3 class="synth">LFO</h3>
+<table>
+  <tr><th>Control</th><th>Range</th><th>What it does</th></tr>
+  <tr><td>RATE Hz</td><td>0.05 – 20 Hz</td><td>LFO speed. Below ~5 Hz = classic slow modulation. Above 10 Hz = audio-rate FM territory.</td></tr>
+  <tr><td>→PITCH</td><td>0 – 100</td><td>LFO depth applied as additive Hz offset to both VCOs. Creates vibrato.</td></tr>
+  <tr><td>→CUTOFF</td><td>0 – 100</td><td>LFO depth applied to filter cutoff. Creates wah / auto-filter sweeps.</td></tr>
+</table>
+
+<h3 class="synth">AMP ENV / FILT ENV (ADSR)</h3>
+<table>
+  <tr><th>Control</th><th>Range</th><th>What it does</th></tr>
+  <tr><td>A ms</td><td>1 – 2000 ms</td><td>Attack time — how long until full amplitude/cutoff is reached.</td></tr>
+  <tr><td>D ms</td><td>1 – 2000 ms</td><td>Decay time — how long to fall from peak to sustain level.</td></tr>
+  <tr><td>S</td><td>0.0 – 1.0</td><td>Sustain level — amplitude/cutoff held while key is gated on.</td></tr>
+  <tr><td>R ms</td><td>1 – 2000 ms</td><td>Release time — how long to fade to silence after note off.</td></tr>
+</table>
+
+<h3 class="synth">FX</h3>
+<table>
+  <tr><th>Control</th><th>Range</th><th>What it does</th></tr>
+  <tr><td>DRIVE</td><td>0 – 100</td><td>Pre-limiter gain. Pushes the signal into the hard limiter for saturation/crunch. 0 = 0.8× gain (clean). 100 = 6× gain (heavy distortion).</td></tr>
+  <tr><td>REVERB</td><td>0 – 100</td><td>NRev wet/dry mix. 0 = dry. Maps to 0–25% wet.</td></tr>
+</table>
+
+<h3 class="synth">GLIDE</h3>
+<table>
+  <tr><th>Control</th><th>Range</th><th>What it does</th></tr>
+  <tr><td>ms</td><td>0 – 500 ms</td><td>Portamento time. 0 = no glide (instant pitch change). Higher values create legato pitch slides between notes.</td></tr>
+</table>
+
+
+<!-- ─────────────────────────────────────────── SYNTH FLOW ──── -->
+<h2 id="synth-flow">GrandMotherMoog Signal Flow</h2>
+
+<div class="flow">
+<span class="block">VCO 1</span>  <span class="arrow">(TRI / SAW / SQR)  ─┐</span>
+<span class="block">VCO 2</span>  <span class="arrow">(TRI / SAW / SQR)  ─┤</span>   <span class="mod">← LFO → pitch (vibrato)</span>
+<span class="block">NOISE</span>                 <span class="arrow">─┤</span>
+<span class="block">EXT IN</span>                <span class="arrow">─┘</span>
+                         <span class="arrow">↓</span>
+                    <span class="block">Gain(mix)</span>
+                         <span class="arrow">↓</span>
+                    <span class="block">Gain(drive)</span>   <span class="arrow">← DRIVE knob</span>
+                         <span class="arrow">↓</span>
+              <span class="block">LPF → LPF → LPF → LPF</span>   <span class="arrow">(4-pole cascade)</span>
+              <span class="mod">← cutoff = base + filtEnv×amt + LFO×lfoCutoff</span>
+                         <span class="arrow">↓</span>
+                   <span class="env">ADSR(ampEnv)</span>
+                         <span class="arrow">↓</span>
+                    <span class="block">Gain(velGain)</span>   <span class="arrow">← velocity 1–127</span>
+                         <span class="arrow">↓</span>
+                  <span class="fx">Dyno(limiter ∞:1)</span>
+                         <span class="arrow">↓</span>
+                    <span class="fx">NRev(reverb)</span>
+                         <span class="arrow">↓</span>
+                     <span class="out">dac (output)</span>
+
+<span class="mod">FILT ENV (ADSR)</span> <span class="arrow">────────────────→ filter cutoff offset</span>
+<span class="mod">LFO</span>             <span class="arrow">────────────────→ pitch &amp; cutoff</span>
+</div>
+
+
+<!-- ─────────────────────────────────────────── LFO ──── -->
+<h2 id="lfo">LFO Modulation in the Drum Machine</h2>
+
+<p>Each drum voice has a free-running <code>SinOsc lfo</code> that is <strong>sampled once at the moment of each hit</strong>. This means the LFO doesn't continuously move the pitch — instead, every time a drum step fires, it takes a snapshot of the LFO's current value and uses that as a one-time offset for that hit.</p>
+
+<p>The result is that consecutive hits sound slightly different from each other, creating an organic, humanised feel rather than robotic repetition. The rate of change between hits depends on both the LFO speed and the BPM.</p>
+
+<table>
+  <tr><th>Voice</th><th>What the LFO modulates</th><th>Effect</th></tr>
+  <tr><td class="kick">KICK</td><td>Pitch sweep start frequency (freqStart ± LFO AMT)</td><td>Each kick has a slightly different pitch attack — some tighter, some deeper</td></tr>
+  <tr><td class="snare">SNARE</td><td>Body tone center frequency (TUNE ± LFO AMT)</td><td>Snare body tonal pitch drifts, creating detuned or pitch-bent snare variation</td></tr>
+  <tr><td class="chat">HIHAT</td><td>High-pass filter cutoff (HPF ± LFO AMT)</td><td>Tonal character of each hat changes — some brighter, some darker</td></tr>
+</table>
+
+<div class="tip">
+  <strong>Recipe — humanised drum loop:</strong> Set all three LFO AMT values to ~10–20% of their ranges with slow LFO rates (0.1–0.5 Hz). The sequencer will never repeat the exact same pattern twice, even with a fixed step grid.
+</div>
+
+<div class="tip">
+  <strong>Recipe — techno wobble kick:</strong> KICK LFO Hz = 1.5 Hz, LFO AMT = 50 Hz. Combined with a long pitch decay (P.DEC = 80 ms), this creates a kick whose pitch "wobbles" differently with each hit — classic Berlin techno feel.
+</div>
+
+
+<!-- ─────────────────────────────────────────── OSC ──── -->
+<h2 id="osc">OSC Address Reference</h2>
+
+<h3 class="synth">GrandMotherMoog — port 9000</h3>
+<table>
+  <tr><th>Address</th><th>Type</th><th>Description</th></tr>
+  <tr><td>/gm/cutoff</td><td>f 0–100</td><td>Filter cutoff</td></tr>
+  <tr><td>/gm/res</td><td>f 0–100</td><td>Filter resonance</td></tr>
+  <tr><td>/gm/envamt</td><td>f 0–100</td><td>Filter envelope amount</td></tr>
+  <tr><td>/gm/drive</td><td>f 0–100</td><td>Pre-limiter drive</td></tr>
+  <tr><td>/gm/reverb</td><td>f 0–100</td><td>Reverb mix</td></tr>
+  <tr><td>/gm/glidems</td><td>f 0–500</td><td>Portamento time (ms)</td></tr>
+  <tr><td>/gm/lforate</td><td>f 0.05–20</td><td>LFO rate (Hz)</td></tr>
+  <tr><td>/gm/lfopitch</td><td>f 0–100</td><td>LFO → pitch depth</td></tr>
+  <tr><td>/gm/lfocutoff</td><td>f 0–100</td><td>LFO → cutoff depth</td></tr>
+  <tr><td>/gm/vco1wave</td><td>i 0–3</td><td>VCO1 wave (0=off 1=tri 2=saw 3=sqr)</td></tr>
+  <tr><td>/gm/vco2wave</td><td>i 0–3</td><td>VCO2 wave</td></tr>
+  <tr><td>/gm/vco1level</td><td>f 0–1</td><td>VCO1 level</td></tr>
+  <tr><td>/gm/vco2level</td><td>f 0–1</td><td>VCO2 level</td></tr>
+  <tr><td>/gm/detune</td><td>f −50–+50</td><td>VCO2 detune (cents)</td></tr>
+  <tr><td>/gm/noise</td><td>f 0–1</td><td>Noise level</td></tr>
+  <tr><td>/gm/extin</td><td>f 0–1</td><td>External input level</td></tr>
+  <tr><td>/gm/ampA · D · S · R</td><td>f</td><td>Amp envelope (ms / 0–1 / ms)</td></tr>
+  <tr><td>/gm/filtA · D · S · R</td><td>f</td><td>Filter envelope</td></tr>
+  <tr><td>/gm/seq/noteon</td><td>i midi</td><td>Absolute MIDI note on</td></tr>
+  <tr><td>/gm/seq/noteoff</td><td>i midi</td><td>Note off</td></tr>
+  <tr><td>/gm/record/start</td><td>s path</td><td>Begin recording to path (WAV)</td></tr>
+  <tr><td>/gm/record/stop</td><td>i 0</td><td>End recording</td></tr>
+</table>
+
+<h3>Drum Machine — port 9001</h3>
+<table>
+  <tr><th>Address</th><th>Type</th><th>Description</th></tr>
+  <tr><td>/drum/bpm</td><td>f</td><td>Sequencer BPM</td></tr>
+  <tr><td>/drum/play</td><td>i 0|1</td><td>Start (1) / Stop (0)</td></tr>
+  <tr><td>/drum/vol</td><td>f 0–1</td><td>Master drum volume</td></tr>
+  <tr><td>/drum/step/kick</td><td>i i</td><td>Step index (0–15), value (0|1)</td></tr>
+  <tr><td>/drum/step/snare</td><td>i i</td><td>Step index, value</td></tr>
+  <tr><td>/drum/step/chat</td><td>i i</td><td>Closed hat step, value</td></tr>
+  <tr><td>/drum/step/ohat</td><td>i i</td><td>Open hat step, value</td></tr>
+  <tr><td>/drum/kick/decay</td><td>f ms</td><td>Kick amplitude decay</td></tr>
+  <tr><td>/drum/kick/tune</td><td>f Hz</td><td>Kick pitch sweep start</td></tr>
+  <tr><td>/drum/kick/pitchdecay</td><td>f ms</td><td>Kick pitch sweep duration</td></tr>
+  <tr><td>/drum/kick/drive</td><td>f 0–100</td><td>Kick drive/saturation</td></tr>
+  <tr><td>/drum/kick/lfo/rate</td><td>f Hz</td><td>Kick LFO speed</td></tr>
+  <tr><td>/drum/kick/lfo/amt</td><td>f Hz</td><td>Kick LFO pitch depth</td></tr>
+  <tr><td>/drum/snare/decay</td><td>f ms</td><td>Snare decay</td></tr>
+  <tr><td>/drum/snare/tune</td><td>f Hz</td><td>Snare body tone frequency</td></tr>
+  <tr><td>/drum/snare/snap</td><td>f 0–100</td><td>Noise/tone balance</td></tr>
+  <tr><td>/drum/snare/lfo/rate</td><td>f Hz</td><td>Snare LFO speed</td></tr>
+  <tr><td>/drum/snare/lfo/amt</td><td>f Hz</td><td>Snare LFO pitch depth</td></tr>
+  <tr><td>/drum/hat/decay/c</td><td>f ms</td><td>Closed hat decay</td></tr>
+  <tr><td>/drum/hat/decay/o</td><td>f ms</td><td>Open hat decay</td></tr>
+  <tr><td>/drum/hat/lfo/rate</td><td>f Hz</td><td>Hi-hat LFO speed</td></tr>
+  <tr><td>/drum/hat/lfo/amt</td><td>f Hz</td><td>Hi-hat LFO HPF cutoff depth</td></tr>
+</table>
+
+
+<!-- ─────────────────────────────────────────── TIPS ──── -->
+<h2 id="tips">Tips &amp; Recipes</h2>
+
+<h3>808-style kick</h3>
+<pre>TUNE Hz   = 60     (very low start)
+P.DEC ms  = 120    (slow pitch slide)
+DECAY ms  = 600    (long tail)
+DRIVE     = 20     (clean)
+LFO AMT   = 0      (consistent)</pre>
+
+<h3>Tight techno kick</h3>
+<pre>TUNE Hz   = 150    (punchy start)
+P.DEC ms  = 30     (fast snap)
+DECAY ms  = 150    (short)
+DRIVE     = 65     (crunchy)
+LFO Hz    = 1.0 Hz
+LFO AMT   = 25 Hz  (subtle per-hit variation)</pre>
+
+<h3>Snare with strong crack</h3>
+<pre>DECAY ms  = 80
+TUNE Hz   = 300
+SNAP      = 85     (mostly noise)</pre>
+
+<h3>Fat rimshot / electronic tom</h3>
+<pre>DECAY ms  = 120
+TUNE Hz   = 120
+SNAP      = 20     (mostly tone)
+LFO AMT   = 60 Hz  (pitch variation between hits)</pre>
+
+<h3>Shaker / tambourine (hi-hat channel)</h3>
+<pre>C.DEC ms  = 25
+LFO Hz    = 3 Hz
+LFO AMT   = 1200 Hz  (varying filter each hit)</pre>
+
+<h3>Running synth + drums together</h3>
+<pre># In one terminal:
+chuck gm.ck drum.ck
+
+# In another:
+python gm_gui.py</pre>
+<p>Set the STEP SEQUENCER BPM and the DRUM MACHINE BPM to the same value. Both sequences run 16 steps of 1/16th notes — they share the same musical grid automatically since they started at the same moment in the same ChucK VM.</p>
+
+<div class="warning">
+  <strong>Latency note:</strong> The GUI's visual step highlight (the orange strip) runs on Python-side timing which is approximate. Actual audio timing is locked inside ChucK at sample accuracy and will not drift. The visual indicator may drift slightly at very high BPM (&gt;200).
+</div>
+
+<footer>
+  GrandMotherMoog + Drum Machine · ChucK + Python/Tkinter + OSC ·
+  gm.ck (synth) · drum.ck (drums) · gm_gui.py (GUI/controller)
+</footer>
+
+</body>
+</html>
