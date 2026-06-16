@@ -10,7 +10,7 @@ readme = "README.md"
 requires-python = ">=3.10,<3.15"
 license = "MIT"
 authors = [
-  { name = "OpenAI ChatGPT" }
+  { name = "Ho San Ko" }
 ]
 dependencies = [
   "numpy (>=1.24)",
