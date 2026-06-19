@@ -341,14 +341,65 @@ class TrackPlayer:
 
 # ── Module-level helper ───────────────────────────────────────────────────────
 
+def _find_rubberband() -> str:
+    """Return path to the rubberband executable (PATH first, then project-local)."""
+    import shutil
+    which = shutil.which("rubberband")
+    if which:
+        return which
+    # Project ships the Windows binary two directories above this file.
+    _local = (
+        Path(__file__).parent.parent.parent
+        / "rubberband-4.0.0-gpl-executable-windows"
+        / "rubberband-4.0.0-gpl-executable-windows"
+        / "rubberband.exe"
+    )
+    if _local.exists():
+        return str(_local)
+    raise FileNotFoundError(
+        "rubberband binary not found on PATH and not at expected project-local path.\n"
+        "Install rubberband-cli (https://breakfastquay.com/rubberband/) and add it to PATH."
+    )
+
+
 def _pyrubberband_stretch(
     audio: np.ndarray, sample_rate: int, ratio: float
 ) -> np.ndarray:
-    """Time-stretch *audio* (N, 2) by *ratio* using pyrubberband per channel."""
-    import pyrubberband
+    """Time-stretch *audio* (N, 2) by *ratio* using the rubberband CLI directly.
+
+    Equivalent to pyrubberband.time_stretch(y, sr, rate) — uses the same
+    ``rubberband -t {ratio}`` invocation — but avoids the pyrubberband package
+    which uses the removed ``imp`` module and cannot build on Python 3.12+.
+    """
+    import subprocess
+    import tempfile
+    import soundfile as sf
 
     if abs(ratio - 1.0) < 1e-9:
         return audio.copy()
-    left = pyrubberband.time_stretch(audio[:, 0], sample_rate, ratio)
-    right = pyrubberband.time_stretch(audio[:, 1], sample_rate, ratio)
-    return np.column_stack([left, right]).astype(np.float32)
+
+    rb = _find_rubberband()
+
+    def _stretch_channel(channel_data: np.ndarray) -> np.ndarray:
+        with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as fin:
+            infile = fin.name
+        with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as fout:
+            outfile = fout.name
+        try:
+            sf.write(infile, channel_data, sample_rate, subtype="PCM_24")
+            subprocess.check_call(
+                [rb, "-t", str(ratio), "--fine", infile, outfile],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            result, _ = sf.read(outfile, always_2d=False, dtype="float32")
+            return result
+        finally:
+            Path(infile).unlink(missing_ok=True)
+            Path(outfile).unlink(missing_ok=True)
+
+    left = _stretch_channel(audio[:, 0])
+    right = _stretch_channel(audio[:, 1])
+    # Trim/pad to same length in case rubberband output lengths differ by 1 sample.
+    n = min(len(left), len(right))
+    return np.column_stack([left[:n], right[:n]]).astype(np.float32)

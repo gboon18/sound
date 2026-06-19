@@ -1,7 +1,9 @@
 {
   "permissions": {
     "allow": [
-      "PowerShell(py -3.12 -m pip install librosa --quiet 2>&1)"
+      "PowerShell(py -3.12 -m pip install librosa --quiet 2>&1)",
+      "PowerShell(cd \"C:\\\\Users\\\\HoSanKo\\\\cplayground\\\\git\\\\sound\\\\4-ch_remix\"; $proc = Start-Process -FilePath \"poetry\" -ArgumentList \"run remix --no-ui\" -PassThru -NoNewWindow -RedirectStandardOutput \"$env:TEMP\\\\remix_out.txt\" -RedirectStandardError \"$env:TEMP\\\\remix_err.txt\"; Start-Sleep -Seconds 4; if \\(-not $proc.HasExited\\) { $proc.Kill\\(\\) }; Get-Content \"$env:TEMP\\\\remix_out.txt\" -ErrorAction SilentlyContinue; Get-Content \"$env:TEMP\\\\remix_err.txt\" -ErrorAction SilentlyContinue | Select-Object -Last 30)",
+      "PowerShell(cd \"C:\\\\Users\\\\HoSanKo\\\\cplayground\\\\git\\\\sound\\\\4-ch_remix\"; poetry run python -c \"import remix_workstation.main as m; print\\('OK:', callable\\(m.main\\)\\)\" 2>&1 | Where-Object { $_ -match 'OK|Error|Traceback' })"
     ]
   }
 }

@@ -21,6 +21,14 @@ import json
 import sys
 from pathlib import Path
 
+# When invoked as `poetry run remix` (entry-point: remix_workstation.main:main)
+# the remix_workstation/ directory is NOT on sys.path, so bare-name imports
+# like `from constants import …` fail.  Add it once here before any internal
+# imports; Python's module cache propagates it to all subsequently-loaded modules.
+_here = Path(__file__).parent
+if str(_here) not in sys.path:
+    sys.path.insert(0, str(_here))
+
 import numpy as np
 import sounddevice as sd
 

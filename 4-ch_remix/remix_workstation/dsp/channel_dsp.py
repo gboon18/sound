@@ -69,14 +69,30 @@ class ChannelDSP:
             p: r.default for p, r in PARAM_RANGES.items()
         }
 
-        # Build the board ONCE: collect plugin refs in chain order
-        all_plugins: list[pedalboard.Plugin] = []
-        all_plugins.extend(self._eq.get_plugins())        # 3 plugins: low/mid/high shelf
-        all_plugins.extend(self._filter.get_plugins())    # 2 plugins: LP + HP
-        all_plugins.extend(self._reverb.get_plugins())    # 1 plugin
-        all_plugins.extend(self._echo.get_plugins())      # 1 plugin
-        all_plugins.extend(self._pitch.get_plugins())     # 1 plugin
-        self._board: pedalboard.Pedalboard = pedalboard.Pedalboard(all_plugins)
+        # Build the main board ONCE: EQ → Filter → Reverb → Echo.
+        # These plugins are zero/low-latency IIR/FDN designs: with reset=False
+        # they return exactly `frames` samples per call and maintain continuity
+        # across callbacks.  PitchShift is deliberately EXCLUDED — see below.
+        main_plugins: list[pedalboard.Plugin] = []
+        main_plugins.extend(self._eq.get_plugins())        # 3 plugins: low/mid/high shelf
+        main_plugins.extend(self._filter.get_plugins())    # 2 plugins: LP + HP
+        main_plugins.extend(self._reverb.get_plugins())    # 1 plugin
+        main_plugins.extend(self._echo.get_plugins())      # 1 plugin
+        self._board: pedalboard.Pedalboard = pedalboard.Pedalboard(main_plugins)
+
+        # PitchShift is a phase-vocoder with ~1 s of priming latency in streaming
+        # (reset=False) mode and emits a periodic re-init artifact under the
+        # default reset=True when fed silence.  We therefore keep it on its OWN
+        # board and engage it ONLY when the pitch is non-zero (see process()).
+        # At the default pitch of 0 — i.e. whenever the channel is idle, and the
+        # common case during playback — it is bypassed entirely, so it never
+        # generates the idle robotic buzz.  When engaged it is run per-block with
+        # reset=True, which returns exactly `frames` samples immediately (no 1 s
+        # latency) at the cost of mild phase-vocoder artifacts inherent to
+        # real-time pitch shifting.
+        self._pitch_board: pedalboard.Pedalboard = pedalboard.Pedalboard(
+            self._pitch.get_plugins()
+        )
 
         # Sync sub-processors to the default param state (sets plugin attrs)
         self._sync_all()
@@ -93,10 +109,37 @@ class ChannelDSP:
 
         pedalboard expects (channels, samples) — we transpose in and out.
         """
+        frames = buffer.shape[0]
         with self._lock:
             audio_in = buffer.T.astype(np.float32, copy=False)  # (2, frames)
-            audio_out: np.ndarray = self._board(audio_in, self._sample_rate)
+            # reset=False: this is ONE continuous stream split into buffer-sized
+            # blocks.  With the default reset=True, every stateful plugin
+            # (Reverb, Delay) tears down and re-initialises its internal state on
+            # EVERY callback (~86×/s at 512 frames / 44.1 kHz), chopping FX tails
+            # at every block boundary.  The IIR/FDN plugins here return exactly
+            # `frames` samples per call with reset=False.
+            audio_out: np.ndarray = self._board(
+                audio_in, self._sample_rate, reset=False
+            )
             result = audio_out.T.copy()  # (frames, 2), writeable
+
+            # ── Pitch stage (engaged only when pitch != 0) ────────────────────
+            # Bypassed at the default pitch of 0 so the phase-vocoder never runs
+            # at idle.  When engaged, run per-block with reset=True: it returns
+            # exactly `frames` samples immediately (streaming reset=False would
+            # impose ~1 s of priming latency before any output).
+            total_shift = (
+                self._params[Param.PITCH_SEMITONE]
+                + self._params[Param.PITCH_CENTS] / 100.0
+            )
+            if abs(total_shift) > 1e-6:
+                pitch_out = self._pitch_board(
+                    result.T, self._sample_rate, reset=True
+                ).T  # (frames, 2)
+                if pitch_out.shape[0] == frames:
+                    result = pitch_out.astype(np.float32, copy=True)
+                # On the rare length mismatch, fall through with the unpitched
+                # result rather than emit a wrong-length buffer.
 
             # Volume — simple scalar multiply
             result *= self._params[Param.VOLUME]
