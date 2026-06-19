@@ -1,0 +1,7 @@
+{
+  "permissions": {
+    "allow": [
+      "PowerShell(py -3.12 -m pip install librosa --quiet 2>&1)"
+    ]
+  }
+}

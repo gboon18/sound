@@ -1,0 +1,17 @@
+# =============================================================================
+# 4-Channel Music Remix Workstation — runtime dependencies
+# pip install -r requirements.txt
+# Python 3.12+ required
+# =============================================================================
+
+PyQt6>=6.6
+sounddevice>=0.5
+soundfile>=0.12
+numpy>=1.26
+librosa>=0.10
+pyrubberband>=0.3
+pedalboard>=0.9
+python-rtmidi>=1.5
+
+# dev / testing only
+pytest>=8.0

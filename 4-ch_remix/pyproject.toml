@@ -1,0 +1,35 @@
+[tool.poetry]
+name        = "4ch-remix-workstation"
+version     = "1.0.0"
+description = "4-Channel Music Remix Workstation with Loop Shaper"
+authors     = ["Ho San Ko <hko@avalanche.energy>"]
+readme      = "README.md"
+packages    = [{include = "remix_workstation"}]
+
+[tool.poetry.scripts]
+remix = "remix_workstation.main:main"
+
+[tool.poetry.dependencies]
+python        = "^3.12"
+PyQt6         = "^6.6"
+sounddevice   = "^0.5"
+soundfile     = "^0.12"
+numpy         = "^1.26"
+librosa       = "^0.10"
+pyrubberband  = "^0.3"
+pedalboard    = "^0.9"
+python-rtmidi = "^1.5"
+
+[tool.poetry.group.dev.dependencies]
+pytest = "^8.0"
+
+[[tool.poetry.source]]
+name     = "PyPI"
+priority = "primary"
+
+[build-system]
+requires      = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"
+
+[tool.pytest.ini_options]
+testpaths = ["remix_workstation/tests"]
